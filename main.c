@@ -52,8 +52,10 @@ double** pctGap;
 // sum of all changes, sum of gaps
 double* totalChangeDate;
 double* totalGapDate;
+
 // number of bars in each date
 int* numBarsDate;
+int* numAvailableSymbolsDate;
 
 // average of all changes and gaps in each date
 double* avChangeDate;
@@ -82,7 +84,7 @@ char readCSV(int fileIndex) {
 
 	if (fileIndex < 0 || fileIndex >= 100000) {
 		printf("Couldn't read file with index %i because out of range [0, 99999].\n", fileIndex);
-		return 0;
+		exit(1);
 	}
 
 	FILE* fp;
@@ -132,6 +134,7 @@ char readCSV(int fileIndex) {
 
 	if (fp == NULL) {
 		printf("Couldn't read file %s, index %i\n\n", fileAddress, fileIndex);
+		exit(1);
 	}
 	if (fp != NULL) {
 		fread(text, sizeof(char), numCharsPerFile, fp);
@@ -362,7 +365,7 @@ char getNextBar() {
 	if (getNextNumber(5, 0)) {
 		return 1;
 	}
-	if (getNextNumber(6, 0)) {
+	if (getNextNumber(6, -2)) {
 		return 1;
 	}
 
@@ -494,13 +497,14 @@ void sort(double* in, double* out, int n) {
 }
 
 // get every data measurement from changes, gaps, and dates
-void getStats() {
+void getStats(int minVolume, int maxVolume) {
 	int i = 0; int j = 0;
 	int d = 0;
 
 	totalChangeDate = (double*)calloc(numDates, sizeof(double));
 	totalGapDate = (double*)calloc(numDates, sizeof(double));
 	numBarsDate = (int*)calloc(numDates, sizeof(int));
+	numAvailableSymbolsDate = (int*)calloc(numDates, sizeof(int));
 
 	avChangeDate = (double*)calloc(numDates, sizeof(double));
 	avGapDate = (double*)calloc(numDates, sizeof(double));
@@ -559,8 +563,6 @@ void getStats() {
 		}
 	}
 
-	int* countWithinDate = (int*)calloc(numDates, sizeof(int));
-
 	// for each bar within each symbol
 	for (i = 0; i < numSymbols; i++) {
 		for (j = 0; j < numBars[i]; j++) {
@@ -570,34 +572,46 @@ void getStats() {
 			stdChange[i][j] = pctChange[i][j] - avChangeDate[d];
 			stdGap[i][j] = pctGap[i][j] - avGapDate[d];
 
-			// place the bar's change and gap among the bars with the same date in change and gap arrays (in sorted order)
-			if (countWithinDate[d] >= numBarsDate[d]) {
+			if (numAvailableSymbolsDate[d] >= numBarsDate[d]) {
 				printf("ERROR: Tried to store more bars on date %i (index %i) than accepted.\n", date[i][j], d);
+				exit(1);
 			}
-			sortedPctChange[d][countWithinDate[d]] = pctChange[i][j];
-			sortedPctGap[d][countWithinDate[d]] = pctGap[i][j];
-			sortedStdChange[d][countWithinDate[d]] = stdChange[i][j];
-			sortedStdGap[d][countWithinDate[d]] = stdGap[i][j];
 
-			countWithinDate[d]++;
+			// place the bar's change and gap among the bars with the same date in change and gap arrays (in sorted order), if the previous day's volume was big enough
+			int previousVolume = 0;
+			if (j > 0) {
+				previousVolume = volume[i][j - 1];
+			}
+			if (previousVolume >= minVolume && previousVolume <= maxVolume) {
 
+				sortedPctChange[d][numAvailableSymbolsDate[d]] = pctChange[i][j];
+				sortedPctGap[d][numAvailableSymbolsDate[d]] = pctGap[i][j];
+				sortedStdChange[d][numAvailableSymbolsDate[d]] = stdChange[i][j];
+				sortedStdGap[d][numAvailableSymbolsDate[d]] = stdGap[i][j];
+
+				// set the number of symbols with high enough volume on this day
+				numAvailableSymbolsDate[d]++;
+			}
 		}
 	}
 
 	// sort only the input and outcome pointer arrays so that in[i] and out[i] are the same symbol on the same day
 	for (i = 0; i < numDates; i++) {
-		sort(sortedPctGap[i], sortedPctChange[i], numBarsDate[i]);
+		sort(sortedPctGap[i], sortedPctChange[i], numAvailableSymbolsDate[i]);
 	}
 }
 
 // backtest the chosen strategy
-void backtest(int dateStart, int dateEnd, double leverage, int startingBarRank, int endingBarRank, char skipIfNotEnoughBars) {
+double backtest(int dateStart, int dateEnd, double leverage, int startingBarRank, int endingBarRank, char skipIfNotEnoughBars, char printResults) {
 
-	if (leverage <= 0.0 || leverage > 1.0) {
-		printf("Backtesting leverage must be greater than 0 and at most 1.\n\n");
+	if (leverage <= 0.0 || leverage > 100.0) {
+		printf("Backtesting leverage must be greater than 0 and at most 100.\n\n");
+		exit(1);
 	}
 
-	printf("Running the backtest from %i to %i... (This may take a few seconds to minutes depending on the amount of data present.)\n\n", dateStart, dateEnd);
+	if (printResults) {
+		printf("Running the backtest from %i to %i... (This may take a few seconds to minutes depending on the amount of data present.)\n\n", dateStart, dateEnd);
+	}
 
 	double balance = 1.0;
 	int numTrades = 0;
@@ -609,6 +623,8 @@ void backtest(int dateStart, int dateEnd, double leverage, int startingBarRank, 
 	double lossrate = 0.0;
 	double totalGain = 0.0;
 	double avSquaredDeviation = 0.0;
+	double avWin = 0.0;
+	double avLoss = 0.0;
 
 	double n = 0.0;
 	double ln = 0.0;
@@ -616,6 +632,8 @@ void backtest(int dateStart, int dateEnd, double leverage, int startingBarRank, 
 	int barEnd = 0;
 
 	int numDatesTraded = 0;
+	int numDatesObserved = 0;
+	int totalNumSymbols = 0;
 
 	int ds = dateToIndex(dateStart);
 	int de = dateToIndex(dateEnd);
@@ -625,18 +643,26 @@ void backtest(int dateStart, int dateEnd, double leverage, int startingBarRank, 
 
 	for (int i = ds; i <= de; i++) {
 
-		int x = numBarsDate[i];
+		int x = numAvailableSymbolsDate[i];
 
-		if (skipIfNotEnoughBars && x < endingBarRank - startingBarRank + 1) { continue; }
+		if (x < 1) continue;
+
+		numDatesObserved++;
+		totalNumSymbols += x;
 
 		int starting = startingBarRank;
 		int ending = endingBarRank;
+		// negative values mean count from the end backwards
 		if (starting < 0) {
 			starting = x + starting;
 		}
 		if (ending < 0) {
 			ending = x + ending;
 		}
+
+		if (skipIfNotEnoughBars && (starting < 0 || starting >= x || ending < 0 || ending >= x)) continue;
+
+		// handle out of bounds starting and ending values
 		if (starting < 0) starting = 0;
 		if (starting >= x) starting = x - 1;
 		if (ending < 0) ending = 0;
@@ -652,10 +678,12 @@ void backtest(int dateStart, int dateEnd, double leverage, int startingBarRank, 
 			// evaluate outcome
 			if (n > 1.0) {
 				wins++;
+				avWin += sortedPctChange[i][j];
 			}
 			else {
 				if (n < 1.0) {
 					losses++;
+					avLoss += sortedPctChange[i][j];
 				}
 				else {
 					ties++;
@@ -676,26 +704,35 @@ void backtest(int dateStart, int dateEnd, double leverage, int startingBarRank, 
 	avSquaredDeviation = avSquaredDeviation / (double)numTrades;
 	double lSR = (balance - 1.0) / sqrt(avSquaredDeviation);
 	double tSR = 0.01 * totalGain / sqrt(avSquaredDeviation);
-	double avGain = totalGain / (double)numTrades;
-	
-	printf("\n\nANALYSIS:\n\n");
-	printf("Number of Dates Traded: %i\n", numDatesTraded);
-	printf("Number of Trades Completed: %i\n", numTrades);
-	printf("Average Number of Trades Per Day: %.4f\n", (double)numTrades / (double)numDatesTraded);
-	printf("Leverage Used: %.6f\n", leverage);
-	printf("Account Balance: %.4f\n", balance);
-	printf("Wins: %i\n", wins);
-	printf("Ties: %i\n", ties);
-	printf("Losses: %i\n", losses);
-	printf("Win Rate: %.4f%%\n", winrate);
-	printf("Tie Rate: %.4f%%\n", tierate);
-	printf("Loss Rate: %.4f%%\n", lossrate);
-	printf("Sum of Trade Results: %.6f%%\n", totalGain);
-	printf("Average Trade Result: %.6f%%\n", avGain);
-	printf("Average Squared Deviation (Variance): %.6f%%\n", avSquaredDeviation * 100.0);
-	printf("Standard Deviation: %.6f%%\n", sqrt(avSquaredDeviation) * 100.0);
-	printf("Leveraged Account Gain Sharpe Ratio: %.6f\n", lSR);
-	printf("Total Trade Gain Sharpe Ratio: %.6f\n", tSR);
+	double avTrade = totalGain / (double)numTrades;
+
+	if (printResults) {
+		printf("\n\nANALYSIS:\n\n");
+		printf("Number of Dates Considered For Trading: %i\n", numDatesObserved);
+		printf("Number of Dates Traded: %i\n", numDatesTraded);
+		printf("Number of Trades Completed: %i\n", numTrades);
+		printf("Average Number of Trades Per Day Traded: %.4f\n", (double)numTrades / (double)numDatesTraded);
+		printf("Average Number of Symbols Available Per Day Traded: %.4f\n", (double)totalNumSymbols / (double)numDatesTraded);
+		printf("Leverage Used: %.6f\n", leverage);
+		printf("Account Balance: %.4f\n", balance);
+		printf("Wins: %i\n", wins);
+		printf("Ties: %i\n", ties);
+		printf("Losses: %i\n", losses);
+		printf("Win Rate: %.4f%%\n", winrate);
+		printf("Tie Rate: %.4f%%\n", tierate);
+		printf("Loss Rate: %.4f%%\n", lossrate);
+		printf("Total of Wins: %.6f%%\n", avWin);
+		printf("Total of Losses: %.6f%%\n", avLoss);
+		printf("Average Win Result: %.6f%%\n", avWin / (double)wins);
+		printf("Average Loss Result: %.6f%%\n", avLoss / (double)losses);
+		printf("Average Trade Result: %.6f%%\n", totalGain / (double)numTrades);
+		printf("Sum of Trade Results: %.6f%%\n", totalGain);
+		printf("Average Squared Deviation (Variance): %.6f%%\n", avSquaredDeviation * 100.0);
+		printf("Standard Deviation: %.6f%%\n", sqrt(avSquaredDeviation) * 100.0);
+		printf("Leveraged Account Gain Sharpe Ratio: %.6f\n", lSR);
+		printf("Total Trade Gain Sharpe Ratio: %.6f\n\n\n", tSR);
+	}
+	return balance;
 }
 
 // print the basic stats for the whole dataset
@@ -830,7 +867,7 @@ void printAllSymbolBars(int startingSymbol, int endingSymbol, int startingDate, 
 }
 
 // setup the file reader, read, reverse (if daily bars are sorted in descending date order), and interpret all the data
-char gatherData(char reverse) {
+char gatherData(char reverse, int minVolume, int maxVolume) {
 
 	printf("Setting up file reader... (This may take a few seconds to minutes depending on the amount of data present.)\n\n");
 
@@ -845,22 +882,52 @@ char gatherData(char reverse) {
 
 	if (reverse) {
 		printf("Reversing data... (This may take a few seconds to minutes depending on the amount of data present.)\n\n");
-
 		reverseData();
 	}
 
 	printf("Getting important statistics... (This may take a few seconds to minutes depending on the amount of data present.)\n\n");
 
-	getStats();
+	getStats(minVolume, maxVolume);
 
 	printf("Finished gathering data.\n\n");
 	
 	return 1;
 }
 
+void printBarChart(int startDate, int endDate, int startingBarRank, int endingBarRank, char skipIfNotEnoughBars, double minLeverage, double maxLeverage, int numChartBars, int chartHeight) {
+	double leverage = 0.0, result = 1.0, maxResult = -1.0 * pow(2.0, 80.0), minResult = pow(2.0, 80.0), worstLeverage = 0.0, bestLeverage = 0.0;
+	double* bars = (double*)calloc(numChartBars, sizeof(double));
+	for (int i = 0; i < numChartBars; i++) {
+		leverage = ((double)i / (double)(numChartBars - 1)) * (maxLeverage - minLeverage) + minLeverage;
+		result = backtest(startDate, endDate, leverage, startingBarRank, endingBarRank, skipIfNotEnoughBars, 0);
+		if (result < minResult) {
+			minResult = result;
+			worstLeverage = leverage;
+		}
+		if (result > maxResult){
+			maxResult = result;
+			bestLeverage = leverage;
+		}
+		bars[i] = result;
+	}
+	for (int i = 0; i < chartHeight; i++) {
+		printf("|");
+		for (int j = 0; j < numChartBars; j++) {
+			if ((bars[j] - minResult) / (maxResult - minResult) >= (double)(chartHeight - i) / (double)chartHeight) {
+				printf("#");
+			}
+			else {
+				printf(" ");
+			}
+		}
+		printf("|\n");
+	}
+	printf("\nMinimum Result: %f at leverage %f, Maximum Result: %f at leverage %f.\n\n\n", minResult, worstLeverage, maxResult, bestLeverage);
+}
+
 int main(void) {
 
-	if (!gatherData(1)) {
+	if (!gatherData(1, 4000, 20000)) {
 		return -1;
 	}
 
@@ -876,7 +943,9 @@ int main(void) {
 
 	//testBacktesting();
 
-	backtest(20100101, 20260101, 0.01, -2, -1, 1);
+	backtest(20240101, 20260101, 0.2, -1, -1, 1, 1);
+
+	printBarChart(20240101, 20260101, -1, -1, 1, 0.01, 1.0, 100, 20);
 
 	return 0;
 }
