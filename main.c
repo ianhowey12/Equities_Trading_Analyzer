@@ -9,14 +9,11 @@
 char text[numCharsPerFile];
 int textSpot;
 
-// maximum number of symbols, for memory allocation
-#define maxNumSymbols 6000
-// number of symbols
-int numSymbols = 0;
-// maximum number of bars a symbol can have, for memory allocation
-#define maxNumBars 6000
-// number of bars for each symbol
-int* numBars;
+#include "main.h"
+
+// low values to denote holes in rectangular arrays
+int DUMMY_INT = 0;
+double DUMMY_DOUBLE = 0.0;
 
 // info for file reading
 int lastNewlinePos = 0;
@@ -24,6 +21,32 @@ int nextNewlinePos = 0;
 char* bar = NULL;
 int barLength = 0;
 int bs = 0;
+
+// maximum number of symbols, for memory allocation
+#define maxNumSymbols 6000
+// number of symbols
+int numSymbols = 0;
+
+// number of bars for each symbol
+int* numBarsBySymbol;
+
+// number of bars in each date
+int* numBarsByDate;
+int* numAvailableSymbolsDate;
+
+// number of date formats in range from Jan 1, 2000 to Dec 31, 2029
+#define rangeDates 300000
+// largest number of dates possible
+#define maxNumDates 5000
+// number of dates encompassed by all bars in the dataset
+int numDates = 0;
+
+// number of bars per date, for all possible date formats
+int dateIsPresent[rangeDates];
+
+// date/index conversion
+int dateToIndex[rangeDates];
+int indexToDate[rangeDates];
 
 // info for file data interpreting
 int currentSymbol = 0;
@@ -33,37 +56,41 @@ char currentTicker[5] = { ' ', ' ', ' ', ' ', ' ' };
 int currentDate = 0;
 int currentNumber[7] = { 0,0,0,0,0,0,0 };
 
-// raw symbol price data
-char** ticker;
-int** date;
+// raw symbol price data ordered by symbol
+char** tickerRaw;
+int** dateRaw;
+int** openRaw;
+int** highRaw;
+int** lowRaw;
+int** closeRaw;
+int** volumeRaw;
+double** pctChangeRaw;
+double** pctGapRaw;
+double** stdChangeRaw;
+double** stdGapRaw;
+
+// raw symbol price data ordered by date
 int** open;
 int** high;
 int** low;
 int** close;
 int** volume;
-
-// number of total possible dates - covers range from Jan 1, 2000 to Dec 31, 2029
-#define numDates 300000
-
-// percentage daily changes and gaps for each bar of each symbol
 double** pctChange;
 double** pctGap;
+double** stdChange;
+double** stdGap;
+
+// first and last date recorded for each symbol's data
+int* firstDate;
+int* lastDate;
 
 // sum of all changes, sum of gaps
 double* totalChangeDate;
 double* totalGapDate;
 
-// number of bars in each date
-int* numBarsDate;
-int* numAvailableSymbolsDate;
-
 // average of all changes and gaps in each date
 double* avChangeDate;
 double* avGapDate;
-
-// standardized (subtract average) change and gap of each bar
-double** stdChange;
-double** stdGap;
 
 // changes and gaps (original and standardized) sorted from highest to lowest
 double** sortedPctChange;
@@ -71,81 +98,63 @@ double** sortedPctGap;
 double** sortedStdChange;
 double** sortedStdGap;
 
-// base addresses for file reading
-char address0[] = "C:\\Daily Stock Data\\ .csv";
-char address1[] = "C:\\Daily Stock Data\\  .csv";
-char address2[] = "C:\\Daily Stock Data\\   .csv";
-char address3[] = "C:\\Daily Stock Data\\    .csv";
-char address4[] = "C:\\Daily Stock Data\\     .csv";
-char addressBaseLength = 20;
+// input (entries) and output (exits) data of trades
+double** entries;
+double** exits;
 
-// read data from a csv file into text
-char readCSV(int fileIndex) {
+int dateIndexStart = 0;
+int dateIndexEnd = 0;
 
-	if (fileIndex < 0 || fileIndex >= 100000) {
-		printf("Couldn't read file with index %i because out of range [0, 99999].\n", fileIndex);
-		exit(1);
-	}
-
-	FILE* fp;
-	
-	char* fileAddress = NULL;
-
-	int b = addressBaseLength;
-
-	if (fileIndex < 10) {
-		address0[b] = fileIndex + 48;
-		fileAddress = address0;
-	}
-	else {
-		if (fileIndex < 100) {
-			address1[b] = (fileIndex / 10) + 48;
-			address1[b + 1] = (fileIndex % 10) + 48;
-			fileAddress = address1;
-		}
-		else {
-			if (fileIndex < 1000) {
-				address2[b] = (fileIndex / 100) + 48;
-				address2[b + 1] = ((fileIndex / 10) % 10) + 48;
-				address2[b + 2] = (fileIndex % 10) + 48;
-				fileAddress = address2;
-			}
-			else {
-				if (fileIndex < 10000) {
-					address3[b] = (fileIndex / 1000) + 48;
-					address3[b + 1] = ((fileIndex / 100) % 10) + 48;
-					address3[b + 2] = ((fileIndex / 10) % 10) + 48;
-					address3[b + 3] = (fileIndex % 10) + 48;
-					fileAddress = address3;
-				}
-				else {
-					address4[b] = (fileIndex / 10000) + 48;
-					address4[b + 1] = ((fileIndex / 1000) % 10) + 48;
-					address4[b + 2] = ((fileIndex / 100) % 10) + 48;
-					address4[b + 3] = ((fileIndex / 10 ) % 10) + 48;
-					address4[b + 4] = (fileIndex % 10) + 48;
-					fileAddress = address4;
-				}
-			}
-		}
-	}
-
-	fopen_s(&fp, fileAddress, "rb");
-
-	if (fp == NULL) {
-		printf("Couldn't read file %s, index %i\n\n", fileAddress, fileIndex);
-		exit(1);
-	}
-	if (fp != NULL) {
-		fread(text, sizeof(char), numCharsPerFile, fp);
-		fclose(fp);
-
-		if (text[numCharsPerFile - 1] != 0) {
-			printf("ERROR: Text file went out of bounds. Increase numCharsPerFile.\n\n");
+// get the indices within the sorted arrays corresponding to the user-provided starting and ending dates
+void getDateIndices(int dateStart, int dateEnd) {
+	dateStart -= 20000000;
+	dateEnd -= 20000000;
+	int ds = dateStart;
+	int de = dateEnd;
+	if (dateStart >= indexToDate[numDates - 1]) ds = indexToDate[numDates - 1];
+	if (dateStart <= indexToDate[0]) ds = indexToDate[0];
+	if (dateEnd >= indexToDate[numDates - 1]) de = indexToDate[numDates - 1];
+	if (dateEnd <= indexToDate[0]) de = indexToDate[0];
+	while (dateToIndex[dateStart] == -1) {
+		dateStart++;
+		if (dateStart >= numDates) {
+			printf("Starting date %i was too large.\n", dateStart + 20000000);
 			exit(1);
 		}
 	}
-	return 1;
+	while (dateToIndex[dateEnd] == -1) {
+		dateEnd--;
+		if (dateEnd < 0) {
+			printf("Ending date %i was too small.\n", dateEnd + 20000000);
+			exit(1);
+		}
+	}
+	dateIndexStart = dateToIndex[dateStart];
+	dateIndexEnd = dateToIndex[dateEnd];
+	if (dateIndexStart == -1) {
+		printf("Starting date index was not found.\n");
+		exit(1);
+	}
+	if (dateIndexStart < 0) {
+		printf("Starting date index was less than 0.\n");
+		exit(1);
+	}
+	if (dateIndexStart >= numDates) {
+		printf("Starting date index was greater than the number of dates present.\n");
+		exit(1);
+	}
+	if (dateIndexEnd == -1) {
+		printf("Ending date index was not found.\n");
+		exit(1);
+	}
+	if (dateIndexEnd < 0) {
+		printf("Ending date index was less than 0.\n");
+		exit(1);
+	}
+	if (dateIndexEnd >= numDates) {
+		printf("Ending date index was greater than the number of dates present.\n");
+		exit(1);
+	}
 }
 
 int power(int b, int e) {
@@ -250,7 +259,9 @@ char getNextDate() {
 		}
 	}
 
-	currentDate = (bar[bst] - 48) * 10000000 + (bar[bst + 1] - 48) * 1000000 + (bar[bst + 2] - 48) * 100000 + (bar[bst + 3] - 48) * 10000 + (bar[bst + 5] - 48) * 1000 + (bar[bst + 6] - 48) * 100 + (bar[bst + 8] - 48) * 10 + (bar[bst + 9] - 48);
+	//currentDate = (bar[bst] - 48) * 10000000 + (bar[bst + 1] - 48) * 1000000 + (bar[bst + 2] - 48) * 100000 + (bar[bst + 3] - 48) * 10000 + (bar[bst + 5] - 48) * 1000 + (bar[bst + 6] - 48) * 100 + (bar[bst + 8] - 48) * 10 + (bar[bst + 9] - 48);
+	currentDate = (bar[bst + 2] - 48) * 100000 + (bar[bst + 3] - 48) * 10000 + (bar[bst + 5] - 48) * 1000 + (bar[bst + 6] - 48) * 100 + (bar[bst + 8] - 48) * 10 + (bar[bst + 9] - 48);
+	dateIsPresent[currentDate]++;
 	bs = bst + 10;
 	return 0;
 }
@@ -298,12 +309,12 @@ char getNextSymbol() {
 			currentTicker[i] = newTicker[i];
 		}
 		if (currentSymbol >= 0) {
-			numBars[currentSymbol] = currentBar;
+			numBarsBySymbol[currentSymbol] = currentBar;
 		}
 		currentBar = 0;
 		currentSymbol++;
 		for (int i = 0; i < 5; i++) {
-			ticker[currentSymbol][i] = currentTicker[i];
+			tickerRaw[currentSymbol][i] = currentTicker[i];
 		}
 	}
 	return 0;
@@ -369,18 +380,23 @@ char getNextBar() {
 		return 1;
 	}
 
-	date[currentSymbol][currentBar] = currentDate;
+	// set the data that was just read for this symbol and bar
+	dateRaw[currentSymbol][currentBar] = currentDate;
+	openRaw[currentSymbol][currentBar] = currentNumber[0];
+	highRaw[currentSymbol][currentBar] = currentNumber[1];
+	lowRaw[currentSymbol][currentBar] = currentNumber[2];
+	closeRaw[currentSymbol][currentBar] = currentNumber[3];
+	volumeRaw[currentSymbol][currentBar] = currentNumber[6];
 
-	open[currentSymbol][currentBar] = currentNumber[0];
-	high[currentSymbol][currentBar] = currentNumber[1];
-	low[currentSymbol][currentBar] = currentNumber[2];
-	close[currentSymbol][currentBar] = currentNumber[3];
-	volume[currentSymbol][currentBar] = currentNumber[6];
+	// update first and last bar within this symbol for by date data arranging later
+	if (currentDate < firstDate[currentSymbol]) firstDate[currentSymbol] = currentDate;
+	if (currentDate > lastDate[currentSymbol]) lastDate[currentSymbol] = currentDate;
 
 	currentBar++;
 	return 0;
 }
 
+// read and parse every text line individually
 void getDataFromText() {
 
 	currentBar = 0;
@@ -404,52 +420,66 @@ void getDataFromText() {
 }
 
 void setup() {
-	int i = 0;
+	int i = 0, j = 0;
 
 	for (i = 0; i < numCharsPerFile; i++) {
 		text[i] = 0;
 	}
 
-	numBars = (int*)calloc(maxNumSymbols, sizeof(int));
+	for (i = 0; i < rangeDates; i++) {
+		dateIsPresent[i] = 0;
+	}
+
+	numBarsBySymbol = (int*)calloc(maxNumSymbols, sizeof(int));
+
+	firstDate = (int*)calloc(maxNumSymbols, sizeof(int));
+	lastDate = (int*)calloc(maxNumSymbols, sizeof(int));
 
 	currentSymbol = -1;
 	currentBar = 0;
 
-	ticker = (char**)calloc(maxNumSymbols, sizeof(char*));
+	tickerRaw = (char**)calloc(maxNumSymbols, sizeof(char*));
 
-	date = (int**)calloc(maxNumSymbols, sizeof(int*));
+	dateRaw = (int**)calloc(maxNumSymbols, sizeof(int*));
 
-	open = (int**)calloc(maxNumSymbols, sizeof(int*));
-	high = (int**)calloc(maxNumSymbols, sizeof(int*));
-	low = (int**)calloc(maxNumSymbols, sizeof(int*));
-	close = (int**)calloc(maxNumSymbols, sizeof(int*));
-	volume = (int**)calloc(maxNumSymbols, sizeof(int*));
+	openRaw = (int**)calloc(maxNumSymbols, sizeof(int*));
+	highRaw = (int**)calloc(maxNumSymbols, sizeof(int*));
+	lowRaw = (int**)calloc(maxNumSymbols, sizeof(int*));
+	closeRaw = (int**)calloc(maxNumSymbols, sizeof(int*));
+	volumeRaw = (int**)calloc(maxNumSymbols, sizeof(int*));
 
-	pctChange = (double**)calloc(maxNumSymbols, sizeof(double*));
-	pctGap = (double**)calloc(maxNumSymbols, sizeof(double*));
+	pctChangeRaw = (double**)calloc(maxNumSymbols, sizeof(double*));
+	pctGapRaw = (double**)calloc(maxNumSymbols, sizeof(double*));
 
-	stdChange = (double**)calloc(maxNumSymbols, sizeof(double*));
-	stdGap = (double**)calloc(maxNumSymbols, sizeof(double*));
+	stdChangeRaw = (double**)calloc(maxNumSymbols, sizeof(double*));
+	stdGapRaw = (double**)calloc(maxNumSymbols, sizeof(double*));
 
-	for (int i = 0; i < maxNumSymbols; i++) {
-		ticker[i] = (char*)calloc(5, sizeof(char));
+	for (i = 0; i < maxNumSymbols; i++) {
+		tickerRaw[i] = (char*)calloc(5, sizeof(char));
 		for (int j = 0; j < 5; j++) {
-			ticker[i][j] = ' ';
+			tickerRaw[i][j] = ' ';
 		}
 
-		date[i] = (int*)calloc(maxNumBars, sizeof(int));
+		dateRaw[i] = (int*)calloc(maxNumDates, sizeof(int));
 
-		open[i] = (int*)calloc(maxNumBars, sizeof(int));
-		high[i] = (int*)calloc(maxNumBars, sizeof(int));
-		low[i] = (int*)calloc(maxNumBars, sizeof(int));
-		close[i] = (int*)calloc(maxNumBars, sizeof(int));
-		volume[i] = (int*)calloc(maxNumBars, sizeof(int));
+		openRaw[i] = (int*)calloc(maxNumDates, sizeof(int));
+		highRaw[i] = (int*)calloc(maxNumDates, sizeof(int));
+		lowRaw[i] = (int*)calloc(maxNumDates, sizeof(int));
+		closeRaw[i] = (int*)calloc(maxNumDates, sizeof(int));
+		volumeRaw[i] = (int*)calloc(maxNumDates, sizeof(int));
 
-		pctChange[i] = (double*)calloc(maxNumBars, sizeof(double));
-		pctGap[i] = (double*)calloc(maxNumBars, sizeof(double));
+		pctChangeRaw[i] = (double*)calloc(maxNumDates, sizeof(double));
+		pctGapRaw[i] = (double*)calloc(maxNumDates, sizeof(double));
 
-		stdChange[i] = (double*)calloc(maxNumBars, sizeof(double));
-		stdGap[i] = (double*)calloc(maxNumBars, sizeof(double));
+		stdChangeRaw[i] = (double*)calloc(maxNumDates, sizeof(double));
+		stdGapRaw[i] = (double*)calloc(maxNumDates, sizeof(double));
+
+		for (j = 0; j < maxNumDates; j++) {
+			pctChangeRaw[i][j] = DUMMY_DOUBLE;
+			pctGapRaw[i][j] = DUMMY_DOUBLE;
+			stdChangeRaw[i][j] = DUMMY_DOUBLE;
+			stdGapRaw[i][j] = DUMMY_DOUBLE;
+		}
 	}
 }
 
@@ -460,102 +490,133 @@ void swap(int* a, int n, int s) {
 }
 
 void reverseData() {
-
 	for (int i = 0; i < numSymbols; i++) {
-		for (int j = 0; j < numBars[i] / 2; j++) {
-			swap(date[i], numBars[i], j);
-			swap(open[i], numBars[i], j);
-			swap(high[i], numBars[i], j);
-			swap(low[i], numBars[i], j);
-			swap(close[i], numBars[i], j);
-			swap(volume[i], numBars[i], j);
+		for (int j = 0; j < numBarsBySymbol[i] / 2; j++) {
+			swap(dateRaw[i], numBarsBySymbol[i], j);
+			swap(openRaw[i], numBarsBySymbol[i], j);
+			swap(highRaw[i], numBarsBySymbol[i], j);
+			swap(lowRaw[i], numBarsBySymbol[i], j);
+			swap(closeRaw[i], numBarsBySymbol[i], j);
+			swap(volumeRaw[i], numBarsBySymbol[i], j);
+			swap(pctChangeRaw[i], numBarsBySymbol[i], j);
+			swap(pctGapRaw[i], numBarsBySymbol[i], j);
+			swap(stdChangeRaw[i], numBarsBySymbol[i], j);
+			swap(stdGapRaw[i], numBarsBySymbol[i], j);
 		}
 	}
 }
 
-int dateToIndex(int d) {
-	return (d - 20000000);
-}
+// sort a pair of arrays from highest to lowest: sort in[] while ordering out[] so that in[i] still corresponds to out[i]
+void sort(double** in, double** out, int exitOffset) {
+	if (exitOffset < 0 || exitOffset > 10) {
+		printf("Trade exit data offset must be between 0 and 10.\n");
+		exit(1);
+	}
 
-// sort a pair of arrays from highest to lowest: sort in[] so that in[i] still corresponds to out[i]
-void sort(double* in, double* out, int n) {
 	double pl = 0.0;
+	entries = (double**)calloc(numSymbols, sizeof(double));
+	exits = (double**)calloc(numSymbols, sizeof(double));
+	int i = 0, j = 0, k = 0;
+	int limit = numDates - exitOffset;
 
-	for (int i = 0; i < n; i++) {
-		for (int j = i + 1; j < n; j++) {
-			if (in[i] < in[j]) {
-				pl = in[i];
-				in[i] = in[j];
-				in[j] = pl;
+	// fill the arrays that determine trade entries and exits
+	for (i = 0; i < numSymbols; i++) {
+		entries[i] = (double*)calloc(numDates, sizeof(double));
+		for (j = 0; j < numDates; j++) {
+			entries[i][j] = in[i][j];
+		}
+		exits[i] = (double*)calloc(numDates, sizeof(double));
+		for (j = 0; j < limit; j++) {
+			exits[i][j] = out[i][j + exitOffset];
+		}
+		for (j = limit; j < numDates; j++) {
+			exits[i][j] = out[i][numDates - 1];
+		}
+	}
 
-				pl = out[i];
-				out[i] = out[j];
-				out[j] = pl;
+	// sort entries and exits
+	for (i = 0; i < numDates; i++) {
+
+		for (j = 0; j < numBarsByDate[i]; j++) {
+			for (k = j + 1; k < numBarsByDate[i]; k++) {
+				if (entries[j][i] < entries[k][i]) {
+					pl = entries[j][i];
+					entries[j][i] = entries[k][i];
+					entries[k][i] = pl;
+
+					pl = exits[j][i];
+					exits[j][i] = exits[k][i];
+					exits[k][i] = pl;
+				}
 			}
 		}
 	}
 }
 
-// get every data measurement from changes, gaps, and dates
+// get every data measurement
 void getStats(int minVolume, int maxVolume) {
-	int i = 0; int j = 0;
-	int d = 0;
+	int i = 0, j = 0, d = 0, n = 0;
 
 	totalChangeDate = (double*)calloc(numDates, sizeof(double));
 	totalGapDate = (double*)calloc(numDates, sizeof(double));
-	numBarsDate = (int*)calloc(numDates, sizeof(int));
 	numAvailableSymbolsDate = (int*)calloc(numDates, sizeof(int));
 
 	avChangeDate = (double*)calloc(numDates, sizeof(double));
 	avGapDate = (double*)calloc(numDates, sizeof(double));
 
+	// get changes and gaps by both symbols and dates
 	for (i = 0; i < numSymbols; i++) {
-		for (j = 0; j < numBars[i]; j++) {
-			if (open[i][j] > 0) {
-				pctChange[i][j] = 100.0 * (double)(close[i][j] - open[i][j]) / (double)open[i][j];
+		for (j = 0; j < numBarsBySymbol[i]; j++) {
+
+			d = dateToIndex[dateRaw[i][j]];
+
+			totalChangeDate[d] += pctChangeRaw[i][j];
+			totalGapDate[d] += pctGapRaw[i][j];
+
+			if (openRaw[i][j] > 0) {
+				pctChangeRaw[i][j] = 100.0 * (double)(closeRaw[i][j] - openRaw[i][j]) / (double)openRaw[i][j];
+				pctChange[i][d] = pctChangeRaw[i][j];
 			}
 			else {
-				pctChange[i][j] = 0.0;
+				pctChangeRaw[i][j] = 0.0;
+				pctChange[i][d] = 0.0;
 			}
 
 			if (j == 0) {
-				pctGap[i][j] = 0.0;
+				pctGapRaw[i][j] = 0.0;
+				pctGap[i][d] = 0.0;
 			}
 			else {
-				if (close[i][j - 1] > 0) {
-					pctGap[i][j] = 100.0 * (double)(open[i][j] - close[i][j - 1]) / (double)close[i][j - 1];
+				if (closeRaw[i][j - 1] > 0) {
+					pctGapRaw[i][j] = 100.0 * (double)(openRaw[i][j] - closeRaw[i][j - 1]) / (double)closeRaw[i][j - 1];
+					pctGap[i][d] = pctChangeRaw[i][d];
 				}
 				else {
-					pctGap[i][j] = 0.0;
+					pctGapRaw[i][j] = 0.0;
+					pctGap[i][d] = 0.0;
 				}
 			}
-
-			d = dateToIndex(date[i][j]);
-
-			numBarsDate[d]++;
-			totalChangeDate[d] += pctChange[i][j];
-			totalGapDate[d] += pctGap[i][j];
 		}
 	}
 
 	// initialize the date arrays which will be filled in sorted order
-	sortedPctChange = (double**)calloc(numDates, sizeof(double));
-	sortedPctGap = (double**)calloc(numDates, sizeof(double));
-	sortedStdChange = (double**)calloc(numDates, sizeof(double));
-	sortedStdGap = (double**)calloc(numDates, sizeof(double));
+	sortedPctChange = (double**)calloc(numSymbols, sizeof(double));
+	sortedPctGap = (double**)calloc(numSymbols, sizeof(double));
+	sortedStdChange = (double**)calloc(numSymbols, sizeof(double));
+	sortedStdGap = (double**)calloc(numSymbols, sizeof(double));
 
-	for (i = 0; i < numDates; i++) {
-		sortedPctChange[i] = (double*)calloc(numBarsDate[i], sizeof(double));
-		sortedPctGap[i] = (double*)calloc(numBarsDate[i], sizeof(double));
-		sortedStdChange[i] = (double*)calloc(numBarsDate[i], sizeof(double));
-		sortedStdGap[i] = (double*)calloc(numBarsDate[i], sizeof(double));
+	for (i = 0; i < numSymbols; i++) {
+		sortedPctChange[i] = (double*)calloc(numBarsBySymbol[i], sizeof(double));
+		sortedPctGap[i] = (double*)calloc(numBarsBySymbol[i], sizeof(double));
+		sortedStdChange[i] = (double*)calloc(numBarsBySymbol[i], sizeof(double));
+		sortedStdGap[i] = (double*)calloc(numBarsBySymbol[i], sizeof(double));
 	}
 
 	// find the average changes and gaps on each date
 	for (i = 0; i < numDates; i++) {
-		if (numBarsDate[i] > 0) {
-			avChangeDate[i] = totalChangeDate[i] / (double)numBarsDate[i];
-			avGapDate[i] = totalGapDate[i] / (double)numBarsDate[i];
+		if (numBarsByDate[i] > 0) {
+			avChangeDate[i] = totalChangeDate[i] / (double)numBarsByDate[i];
+			avGapDate[i] = totalGapDate[i] / (double)numBarsByDate[i];
 		}
 		else {
 			avChangeDate[i] = 0.0;
@@ -565,39 +626,48 @@ void getStats(int minVolume, int maxVolume) {
 
 	// for each bar within each symbol
 	for (i = 0; i < numSymbols; i++) {
-		for (j = 0; j < numBars[i]; j++) {
-			d = dateToIndex(date[i][j]);
+		for (j = 0; j < numBarsBySymbol[i]; j++) {
+
+			d = dateToIndex[dateRaw[i][j]];
+			printf("%i %i %i\n", i, j, d);
 
 			// get the standardized change and gap values for each bar by subtracting the average change and gap values on the bar's date from the bar's change and gap values
-			stdChange[i][j] = pctChange[i][j] - avChangeDate[d];
-			stdGap[i][j] = pctGap[i][j] - avGapDate[d];
+			stdChangeRaw[i][j] = pctChangeRaw[i][j] - avChangeDate[d];
+			stdGapRaw[i][j] = pctGapRaw[i][j] - avGapDate[d];
 
-			if (numAvailableSymbolsDate[d] >= numBarsDate[d]) {
-				printf("ERROR: Tried to store more bars on date %i (index %i) than accepted.\n", date[i][j], d);
+			if (numAvailableSymbolsDate[d] >= numBarsByDate[d]) {
+				printf("ERROR: Tried to store more bars (limit: %i) on date %i (index %i) than accepted.\n", numBarsByDate[d], dateRaw[i][j] + 20000000, d);
 				exit(1);
 			}
+
+			// skip empty bars
+			if (pctChangeRaw[i][j] == DUMMY_DOUBLE) continue;
+			if (pctGapRaw[i][j] == DUMMY_DOUBLE) continue;
+			if (stdChangeRaw[i][j] == DUMMY_DOUBLE) continue;
+			if (stdGapRaw[i][j] == DUMMY_DOUBLE) continue;
 
 			// place the bar's change and gap among the bars with the same date in change and gap arrays (in sorted order), if the previous day's volume was big enough
 			int previousVolume = 0;
 			if (j > 0) {
-				previousVolume = volume[i][j - 1];
+				previousVolume = volumeRaw[i][j - 1];
 			}
 			if (previousVolume >= minVolume && previousVolume <= maxVolume) {
 
-				sortedPctChange[d][numAvailableSymbolsDate[d]] = pctChange[i][j];
-				sortedPctGap[d][numAvailableSymbolsDate[d]] = pctGap[i][j];
-				sortedStdChange[d][numAvailableSymbolsDate[d]] = stdChange[i][j];
-				sortedStdGap[d][numAvailableSymbolsDate[d]] = stdGap[i][j];
+				n = numAvailableSymbolsDate[d];
+
+				if (n >= numBarsBySymbol[i]) {
+					printf("Number of symbols detected on date %i (index %i) was %i and exceeded the maximum allocated of %i.\n", dateRaw[i][j] + 20000000, d, n, numBarsBySymbol[i]);
+					exit(1);
+				}
+				sortedPctChange[n][d] = pctChangeRaw[i][j];
+				sortedPctGap[n][d] = pctGapRaw[i][j];
+				sortedStdChange[n][d] = stdChangeRaw[i][j];
+				sortedStdGap[n][d] = stdGapRaw[i][j];
 
 				// set the number of symbols with high enough volume on this day
 				numAvailableSymbolsDate[d]++;
 			}
 		}
-	}
-
-	// sort only the input and outcome pointer arrays so that in[i] and out[i] are the same symbol on the same day
-	for (i = 0; i < numDates; i++) {
-		sort(sortedPctGap[i], sortedPctChange[i], numAvailableSymbolsDate[i]);
 	}
 }
 
@@ -606,6 +676,10 @@ double backtest(int dateStart, int dateEnd, double leverage, int startingBarRank
 
 	if (leverage <= 0.0 || leverage > 100.0) {
 		printf("Backtesting leverage must be greater than 0 and at most 100.\n\n");
+		exit(1);
+	}
+	if (dateStart > dateEnd) {
+		printf("Starting date must be less than or equal to ending date.\n\n");
 		exit(1);
 	}
 
@@ -635,15 +709,12 @@ double backtest(int dateStart, int dateEnd, double leverage, int startingBarRank
 	int numDatesObserved = 0;
 	int totalNumSymbols = 0;
 
-	int ds = dateToIndex(dateStart);
-	int de = dateToIndex(dateEnd);
+	getDateIndices(dateStart, dateEnd);
 
-	if (ds < 0) ds = 0;
-	if (de > numDates) de = numDates;
-
-	for (int i = ds; i <= de; i++) {
+	for (int i = dateIndexStart; i <= dateIndexEnd; i++) {
 
 		int x = numAvailableSymbolsDate[i];
+		double e = 0;
 
 		if (x < 1) continue;
 
@@ -668,22 +739,23 @@ double backtest(int dateStart, int dateEnd, double leverage, int startingBarRank
 		if (ending < 0) ending = 0;
 		if (ending >= x) ending = x - 1;
 
-		// trade on 10 largest gap bars this day
+		// trade on selected bars this day
 		for (int j = starting; j <= ending; j++) {
+			e = exits[j][i];
 
 			// calculate what to multiply account by as a result of this trade
-			n = (100.0 + sortedPctChange[i][j]) / 100.0;
-			ln = (100.0 + leverage * sortedPctChange[i][j]) / 100.0;
+			n = (100.0 + e) / 100.0;
+			ln = (100.0 + leverage * e) / 100.0;
 
 			// evaluate outcome
 			if (n > 1.0) {
 				wins++;
-				avWin += sortedPctChange[i][j];
+				avWin += e;
 			}
 			else {
 				if (n < 1.0) {
 					losses++;
-					avLoss += sortedPctChange[i][j];
+					avLoss += e;
 				}
 				else {
 					ties++;
@@ -691,8 +763,8 @@ double backtest(int dateStart, int dateEnd, double leverage, int startingBarRank
 			}
 			balance *= ln;
 			numTrades++;
-			totalGain += sortedPctChange[i][j];
-			avSquaredDeviation += sortedPctChange[i][j] * sortedPctChange[i][j] / 10000.0;
+			totalGain += e;
+			avSquaredDeviation += e * e / 10000.0;
 		}
 		
 		numDatesTraded++;
@@ -744,16 +816,16 @@ void testBacktesting() {
 	int ties = 0;
 	int total = 0;
 	for (int i = 0; i < numSymbols; i++) {
-		for (int j = 1; j < numBars[i]; j++) {
-			if (close[i][j] > open[i][j]) {
+		for (int j = 1; j < numBarsBySymbol[i]; j++) {
+			if (closeRaw[i][j] > openRaw[i][j]) {
 				wins++;
-				won += close[i][j] - open[i][j];
+				won += closeRaw[i][j] - openRaw[i][j];
 			}
-			if (close[i][j] < open[i][j]) {
+			if (closeRaw[i][j] < openRaw[i][j]) {
 				losses++;
-				lost += close[i][j] - open[i][j];
+				lost += closeRaw[i][j] - openRaw[i][j];
 			}
-			if (close[i][j] == open[i][j]) {
+			if (closeRaw[i][j] == openRaw[i][j]) {
 				ties++;
 			}
 			total++;
@@ -764,50 +836,47 @@ void testBacktesting() {
 
 // print outlying bar values
 void findOutliers() {
+	double n = 0;
 	for(int i = 0; i < numSymbols; i++) {
-		for (int j = 0; j < numBars[i]; j++) {
-			if (pctGap[i][j] >= 100.00 || pctGap[i][j] <= -100.00) { printf("Symbol %i with ticker %s at bar %i has an outlying daily gap of %.2f percent.\n", i, ticker[i], j, pctGap[i][j]);}
-			if (pctChange[i][j] >= 100.00 || pctChange[i][j] <= -100.00) { printf("Symbol %i with ticker %s at bar %i has an outlying daily change of %.2f percent.\n", i, ticker[i], j, pctChange[i][j]); }
+		for (int j = 0; j < numBarsBySymbol[i]; j++) {
+			n = sortedPctGap[i][j];
+			if (n >= 100.00 || n <= -100.00) { printf("Symbol %i with ticker %s at bar %i has an outlying daily gap of %.2f percent.\n", i, tickerRaw[i], j, sortedPctGap[i][j]);}
+			n = sortedPctChange[i][j];
+			if (n >= 100.00 || n <= -100.00) { printf("Symbol %i with ticker %s at bar %i has an outlying daily change of %.2f percent.\n", i, tickerRaw[i], j, sortedPctChange[i][j]); }
 
 			// print the first outlying close price and ticker symbol of the stocks with at least one daily close greater than $10000
 			// note: greater than $100000s have all been removed except BRK.A
-			if (close[i][j] >= 1000000) { printf("Symbol %i with ticker %s at bar %i has an outlying close of $%.2f.\n", i, ticker[i], j, (double)close[i][j] / 100.0); break; }
+			if (closeRaw[i][j] >= 1000000) { printf("Symbol %i with ticker %s at bar %i has an outlying close of $%.2f.\n", i, tickerRaw[i], j, (double)closeRaw[i][j] / 100.0); break; }
 		}
 	}
 	printf("\n");
 }
 
 // print the average values for every date with at least 1 bar
-void printAverages(int startingDate, int endingDate) {
+void printAverages(int dateStart, int dateEnd) {
 	int d = 0;
 
-	if (startingDate < 20000000) startingDate = 20000000;
-	if (startingDate >= 20300000) startingDate = 20299999;
-	if(endingDate < 20000000) endingDate = 20000000;
-	if (endingDate >= 20300000) endingDate = 20299999;
+	getDateIndices(dateStart, dateEnd);
 
-	for (int i = startingDate; i <= endingDate; i++) {
-		d = dateToIndex(i);
-		if (numBarsDate[d] > 0) {
-			printf("Date: %i, Number of Bars: %i, Average Change: %f, Average Gap: %f\n", i, numBarsDate[d], avChangeDate[d], avGapDate[d]);
+	for (int i = dateIndexStart; i <= dateIndexEnd; i++) {
+		d = indexToDate[i];
+		if (numBarsByDate[d] > 0) {
+			printf("Date: %i, Number of Bars: %i, Average Change: %f, Average Gap: %f\n", d + 20000000, numBarsByDate[i], avChangeDate[i], avGapDate[i]);
 		}
 	}
 	printf("\n");
 }
 
 // print the bar price values for every date
-void printNumDateBars(int startingDate, int endingDate) {
+void printNumDateBars(int dateStart, int dateEnd) {
 	int d = 0;
 
-	if (startingDate < 20000000) startingDate = 20000000;
-	if (startingDate >= 20300000) startingDate = 20299999;
-	if (endingDate < 20000000) endingDate = 20000000;
-	if (endingDate >= 20300000) endingDate = 20299999;
+	getDateIndices(dateStart, dateEnd);
 
-	for (int i = startingDate; i <= endingDate; i++) {
-		d = dateToIndex(i);
-		if (numBarsDate[d] > 0) {
-			printf("Date: %i, Number of Bars: %i\n", i, numBarsDate[d]);
+	for (int i = dateIndexStart; i <= dateIndexEnd; i++) {
+		d = indexToDate[i];
+		if (numBarsByDate[d] > 0) {
+			printf("Date: %i, Number of Bars: %i\n", d + 20000000, numBarsByDate[i]);
 		}
 	}
 	printf("\n");
@@ -821,25 +890,22 @@ void printNumSymbolBars(int start, int end) {
 	if (end >= numSymbols) end = numSymbols - 1;
 
 	for (int i = start; i <= end; i++) {
-		printf("Symbol Index: %i, Ticker %s, Number of Bars: %i\n", i, ticker[i], numBars[i]);
+		printf("Symbol Index: %i, Ticker %s, Number of Bars: %i\n", i, tickerRaw[i], numBarsBySymbol[i]);
 	}
 	printf("\n");
 }
 
 // print the bar changes and gaps for every date
-void printAllDateBars(int startingDate, int endingDate) {
+void printAllDateBars(int dateStart, int dateEnd) {
 	int d = 0;
 
-	if (startingDate < 20000000) startingDate = 20000000;
-	if (startingDate >= 20300000) startingDate = 20299999;
-	if (endingDate < 20000000) endingDate = 20000000;
-	if (endingDate >= 20300000) endingDate = 20299999;
+	getDateIndices(dateStart, dateEnd);
 
-	for (int i = startingDate; i <= endingDate; i++) {
-		d = dateToIndex(i);
-		if (numBarsDate[d] > 0) {
-			for (int j = 0; j < numBarsDate[d]; j++) {
-				printf("Date %i, Bar %i: Change: %.2f%%, Gap: %.2f%%, Standardized Change: %.2f%%, Standardized Gap: %.2f%%\n", i, j, sortedPctChange[d][j], sortedPctGap[d][j], sortedStdChange[d][j], sortedStdGap[d][j]);
+	for (int i = dateIndexStart; i <= dateIndexEnd; i++) {
+		d = indexToDate[i];
+		if (numBarsByDate[d] > 0) {
+			for (int j = 0; j < numBarsByDate[i]; j++) {
+				printf("Date %i, Bar %i: Change: %.2f%%, Gap: %.2f%%, Standardized Change: %.2f%%, Standardized Gap: %.2f%%\n", d + 20000000, j, sortedPctChange[d][j], sortedPctGap[d][j], sortedStdChange[d][j], sortedStdGap[d][j]);
 			}
 		}
 	}
@@ -856,14 +922,109 @@ void printAllSymbolBars(int startingSymbol, int endingSymbol, int startingDate, 
 
 	for (int i = startingSymbol; i <= endingSymbol; i++) {
 		printf("Symbol %i\n", i);
-		for (int j = 0; j < numBars[i]; j++) {
-			if (date[i][j] >= startingDate && date[i][j] <= endingDate) {
-				printf("Bar %i (%i): %i %i %i %i, Change: %.2f%%, Gap: %.2f%%\n", j, date[i][j], open[i][j], high[i][j], low[i][j], close[i][j], pctChange[i][j], pctGap[i][j]);
+		for (int j = 0; j < numBarsBySymbol[i]; j++) {
+			if (dateRaw[i][j] >= startingDate && dateRaw[i][j] <= endingDate && pctChangeRaw[i][j] > DUMMY_DOUBLE && pctGapRaw[i][j] > DUMMY_DOUBLE) {
+				printf("Bar %i (%i): %i %i %i %i, Change: %.2f%%, Gap: %.2f%%\n", j, dateRaw[i][j], openRaw[i][j], highRaw[i][j], lowRaw[i][j], closeRaw[i][j], pctChangeRaw[i][j], pctGapRaw[i][j]);
 			}
 		}
 		printf("\n");
 	}
 	printf("Number of symbols: %i\n\n", numSymbols);
+}
+
+// create date/index converter, initialize and fill data storage by date
+void setupDateData() {
+	int i = 0, j = 0, k = 0;
+
+	// create date/index converter
+	int spot = 0;
+	for (i = 0; i < rangeDates; i++) {
+		if (dateIsPresent[i]) {
+			dateToIndex[i] = spot;
+			indexToDate[spot] = i;
+			spot++;
+		}
+	}
+	numDates = spot;
+
+	numBarsByDate = (int*)calloc(numDates, sizeof(int));
+	for (i = 0; i < rangeDates; i++) {
+		if (dateIsPresent[i]) {
+			numBarsByDate[dateToIndex[i]] = dateIsPresent[i];
+		}
+	}
+
+	open = (int**)calloc(numSymbols, sizeof(int*));
+	high = (int**)calloc(numSymbols, sizeof(int*));
+	low = (int**)calloc(numSymbols, sizeof(int*));
+	close = (int**)calloc(numSymbols, sizeof(int*));
+	volume = (int**)calloc(numSymbols, sizeof(int*));
+
+	pctChange = (double**)calloc(numSymbols, sizeof(double*));
+	pctGap = (double**)calloc(numSymbols, sizeof(double*));
+
+	stdChange = (double**)calloc(numSymbols, sizeof(double*));
+	stdGap = (double**)calloc(numSymbols, sizeof(double*));
+
+	for (i = 0; i < numSymbols; i++) {
+
+		open[i] = (int*)calloc(numDates, sizeof(int));
+		high[i] = (int*)calloc(numDates, sizeof(int));
+		low[i] = (int*)calloc(numDates, sizeof(int));
+		close[i] = (int*)calloc(numDates, sizeof(int));
+		volume[i] = (int*)calloc(numDates, sizeof(int));
+
+		pctChange[i] = (double*)calloc(numDates, sizeof(double));
+		pctGap[i] = (double*)calloc(numDates, sizeof(double));
+
+		stdChange[i] = (double*)calloc(numDates, sizeof(double));
+		stdGap[i] = (double*)calloc(numDates, sizeof(double));
+	}
+
+	// fill arrays using raw arrays filled previously
+	for (i = 0; i < numSymbols; i++) {
+		for (j = 0; j < numBarsBySymbol[i]; j++) {
+			
+			int d = dateToIndex[dateRaw[i][j]];
+			open[i][d] = openRaw[i][j];
+			high[i][d] = highRaw[i][j];
+			low[i][d] = lowRaw[i][j];
+			close[i][d] = closeRaw[i][j];
+			volume[i][d] = volumeRaw[i][j];
+			pctChange[i][d] = pctChangeRaw[i][j];
+			pctGap[i][d] = pctGapRaw[i][j];
+			stdChange[i][d] = stdChangeRaw[i][j];
+			stdGap[i][d] = stdGapRaw[i][j];
+		}
+
+		// fill holes in new arrays
+		for (j = firstDate[i] - 1; j >= 0; j--) {
+			// copy the first value left to fill in dates before the beginning of this symbol's history
+			open[i][j] = open[i][j + 1];
+			high[i][j] = high[i][j + 1];
+			low[i][j] = low[i][j + 1];
+			close[i][j] = close[i][j + 1];
+			volume[i][j] = volume[i][j + 1];
+			pctChange[i][j] = DUMMY_DOUBLE;
+			pctGap[i][j] = DUMMY_DOUBLE;
+			stdChange[i][j] = DUMMY_DOUBLE;
+			stdGap[i][j] = DUMMY_DOUBLE;
+		}
+		for (j = firstDate[i] + 1; j < numDates; j++) {
+			// copy next values right to fill in holes and dates after symbol history
+			if (close[i][j] == 0) {
+				open[i][j] = open[i][j - 1];
+				high[i][j] = high[i][j - 1];
+				low[i][j] = low[i][j - 1];
+				close[i][j] = close[i][j - 1];
+				volume[i][j] = volume[i][j - 1];
+				pctChange[i][j] = DUMMY_DOUBLE;
+				pctGap[i][j] = DUMMY_DOUBLE;
+				stdChange[i][j] = DUMMY_DOUBLE;
+				stdGap[i][j] = DUMMY_DOUBLE;
+			}
+		}
+	}
 }
 
 // setup the file reader, read, reverse (if daily bars are sorted in descending date order), and interpret all the data
@@ -876,7 +1037,7 @@ char gatherData(char reverse, int minVolume, int maxVolume) {
 	printf("Reading data... (This may take a few seconds to minutes depending on the amount of data present.)\n\n");
 
 	for (int i = 0; i < numFiles; i++) {
-		if (!readCSV(i)) { return 0; }
+		if (!readCSV(i, text)) { return 0; }
 		getDataFromText();
 	}
 
@@ -884,6 +1045,8 @@ char gatherData(char reverse, int minVolume, int maxVolume) {
 		printf("Reversing data... (This may take a few seconds to minutes depending on the amount of data present.)\n\n");
 		reverseData();
 	}
+
+	setupDateData();
 
 	printf("Getting important statistics... (This may take a few seconds to minutes depending on the amount of data present.)\n\n");
 
@@ -894,12 +1057,12 @@ char gatherData(char reverse, int minVolume, int maxVolume) {
 	return 1;
 }
 
-void printBarChart(int startDate, int endDate, int startingBarRank, int endingBarRank, char skipIfNotEnoughBars, double minLeverage, double maxLeverage, int numChartBars, int chartHeight) {
+void printBarChart(int dateStart, int dateEnd, int startingBarRank, int endingBarRank, char skipIfNotEnoughBars, double minLeverage, double maxLeverage, int numChartBars, int chartHeight) {
 	double leverage = 0.0, result = 1.0, maxResult = -1.0 * pow(2.0, 80.0), minResult = pow(2.0, 80.0), worstLeverage = 0.0, bestLeverage = 0.0;
 	double* bars = (double*)calloc(numChartBars, sizeof(double));
 	for (int i = 0; i < numChartBars; i++) {
 		leverage = ((double)i / (double)(numChartBars - 1)) * (maxLeverage - minLeverage) + minLeverage;
-		result = backtest(startDate, endDate, leverage, startingBarRank, endingBarRank, skipIfNotEnoughBars, 0);
+		result = backtest(dateStart, dateEnd, leverage, startingBarRank, endingBarRank, skipIfNotEnoughBars, 0);
 		if (result < minResult) {
 			minResult = result;
 			worstLeverage = leverage;
@@ -922,14 +1085,23 @@ void printBarChart(int startDate, int endDate, int startingBarRank, int endingBa
 		}
 		printf("|\n");
 	}
+	printf("\nShowing balance outcome results from date %i to date %i .\n\n\n", dateStart, dateEnd);
 	printf("\nMinimum Result: %f at leverage %f, Maximum Result: %f at leverage %f.\n\n\n", minResult, worstLeverage, maxResult, bestLeverage);
 }
 
 int main(void) {
 
+	DUMMY_INT = INT_MIN;
+	DUMMY_DOUBLE = (double)INT_MIN;
+
 	if (!gatherData(1, 4000, 20000)) {
 		return -1;
 	}
+
+	// set and sort only the input and outcome pointer arrays so that in[i] and out[i] are the same symbol on the same day
+	sort(sortedPctGap, sortedPctGap, 1);
+
+
 
 	//printAllSymbolBars(0, 3, 20240102, 20240106);
 	//printAllDateBars(20240102, 20240106);
@@ -942,7 +1114,7 @@ int main(void) {
 	//findOutliers();
 
 	//testBacktesting();
-
+	
 	backtest(20240101, 20260101, 0.2, -1, -1, 1, 1);
 
 	printBarChart(20240101, 20260101, -1, -1, 1, 0.01, 1.0, 100, 20);
