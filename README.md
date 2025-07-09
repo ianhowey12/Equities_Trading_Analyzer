@@ -5,16 +5,14 @@ Includes functions for examining and analyzing daily historical financial data (
 
 Provides statistics such as winrate, account balance change, variance, standard deviation, and Sharpe ratio in backtesting.
 
-Backtesting and barchart display allow minimum and maximum daily volume requirements. You can also customize the range of dates involved, the account leverage, and the number of bars to trade each day.
+Backtesting and histogram display allow minimum and maximum daily volume requirements. You can also customize the range of dates involved, the account leverage, and the number of symbols to trade each day. Changing btMinSymbolRankDay and btMaxSymbolRankDay changes which symbols are traded on each day. They are ranked in order of their customizable entry condition. Other backtesting settings can be changed within main().
 
-This program requires local files to be stored within "C:\Daily Stock Data\" on your PC's drive and numbered increasing from 0.
+This program requires local CSV files to be stored within "C:\Daily Stock Data\" on your PC's drive.
 
-Example: "C:\Daily Stock Data\356.csv".
+The first line of each file is assumed to not contain data.
+
+The dates of the price data need to be indicated within each line and need to increase as the line numbers increase and as the file names increase in lexicographical order.
 
 Change the parameter numFiles to the number of files within that folder.
 
-All historical data files must be stored in CSV format in the order "symbol,year-month-day,open,high,low,close,change,change%,volume" on each line.
-
-Ticker symbols must contain only capital letters and periods and can be up to five characters long.
-
-The first and last lines of each file are assumed to not contain data.
+Change columnCodes to indicate the format of each line.
