@@ -106,17 +106,20 @@ vector<double> lastPrice(maxNumSymbols, DUMMY_DOUBLE);
 vector<vector<double>> entries;
 vector<vector<double>> exits;
 
+// list of symbols to either allow or ban
+unordered_map<string, bool> listedSymbols;
+int numListedSymbols = 0;
+
 // global backtesting settings
+bool btBanListedSymbols = true;
 int btStartingDateIndex = 0;
 int btEndingDateIndex = 0;
 int btMinSymbolRankDay = 0;
 int btMaxSymbolRankDay = 9;
+bool btSortDataAscending = false;
 long long dwbtMinPreviousVolume = 0;
 long long dwbtMaxPreviousVolume = 0;
 int btPreviousVolumeLookBackLength = 0;
-int mwbtEarliestTimeToTrade = 930;
-int mwbtLatestTimeToTrade = 1559;
-bool mwbtUseTradingTimes = false;
 double btLeverage = 1.0;
 bool btDisregardFilters = false;
 double btMinOutlier = 0.0;
@@ -130,9 +133,11 @@ bool btPrintLoading = true;
 int btPrintLoadingInterval = 1;
 int btLoadingBarWidth = 60;
 bool btPrintSummary = true;
+int btPrintResultsIncrement = 1;
 
-// outcome stats with respect to # of symbols traded each day
-double btResult = 0.0;
+// outcomes on each day, for distribution analysis
+vector<double> btResult;
+vector<vector<double>> btResultDate;
 
 // backtesting stats for different numbers of symbols traded per day
 vector<int> btTrades;
@@ -777,19 +782,19 @@ void getDateIndices(int ds, int de) {
 	btStartingDateIndex = date_index.at(ds);
 	btEndingDateIndex = date_index.at(de);
 	if (btStartingDateIndex < 0) {
-		printf("Starting date index was less than 0.\n");
+		cerr << "Starting date index was less than 0.\n";
 		exit(1);
 	}
 	if (btStartingDateIndex >= numDates) {
-		printf("Starting date index was greater than the number of dates present.\n");
+		cerr << "Starting date index was greater than the number of dates present.\n";
 		exit(1);
 	}
 	if (btEndingDateIndex < 0) {
-		printf("Ending date index was less than 0.\n");
+		cerr << "Ending date index was less than 0.\n";
 		exit(1);
 	}
 	if (btEndingDateIndex >= numDates) {
-		printf("Ending date index was greater than the number of dates present.\n");
+		cerr << "Ending date index was greater than the number of dates present.\n";
 		exit(1);
 	}
 }
@@ -833,9 +838,10 @@ void swap(double* a, int n, int s) {
 	a[n - 1 - s] = pl;
 }
 
-/* positive/negative/zero sort algorithm (no faster than regular bucket sort algorithm) (I didn't add in the loading bar to this code)
+/* positive/negative/zero sort algorithm (no faster than regular bucket sort algorithm)
+// I didn't add in the loading bar to this code. Also, descending order sort does not work properly as buckets are individually descending but ascend.
 // sort a pair of arrays from highest to lowest: sort in[] while ordering out[] so that in[i] still corresponds to out[i]
-void sortData(bool ascending) {
+void sortData() {
 	
 	double pl = 0.0;
 	int i = 0, j = 0, k = 0, l = 0;
@@ -937,7 +943,7 @@ void sortData(bool ascending) {
             // sort them using exchange sort
             for (k = 0; k < size(posBucketsEntries[j]); k++) {
                 for (l = k + 1; l < size(posBucketsEntries[j]); l++) {
-                    swap = ascending && posBucketsEntries[j][k] > posBucketsEntries[j][l] || !ascending && posBucketsEntries[j][k] < posBucketsEntries[j][l];
+                    swap = btSortDataAscending && posBucketsEntries[j][k] > posBucketsEntries[j][l] || !btSortDataAscending && posBucketsEntries[j][k] < posBucketsEntries[j][l];
                     if (swap) {
                         temp = posBucketsEntries[j][k];
                         posBucketsEntries[j][k] = posBucketsEntries[j][l];
@@ -960,7 +966,7 @@ void sortData(bool ascending) {
             // sort them using exchange sort
             for (k = 0; k < size(negBucketsEntries[j]); k++) {
                 for (l = k + 1; l < size(negBucketsEntries[j]); l++) {
-                    swap = ascending && negBucketsEntries[j][k] > negBucketsEntries[j][l] || !ascending && negBucketsEntries[j][k] < negBucketsEntries[j][l];
+                    swap = btSortDataAscending && negBucketsEntries[j][k] > negBucketsEntries[j][l] || !btSortDataAscending && negBucketsEntries[j][k] < negBucketsEntries[j][l];
                     if (swap) {
                         temp = negBucketsEntries[j][k];
                         negBucketsEntries[j][k] = negBucketsEntries[j][l];
@@ -1018,10 +1024,8 @@ void sortData(bool ascending) {
     }
 } */
 
-// sort a pair of arrays from highest to lowest: sort in[] while ordering out[] so that in[i] still corresponds to out[i]
-void sortData(bool ascending) {
-	
-	double pl = 0.0;
+void loadData(){
+    double pl = 0.0;
 	int i = 0, j = 0, k = 0, l = 0;
     entries.clear();
     exits.clear();
@@ -1031,26 +1035,76 @@ void sortData(bool ascending) {
 	for (i = 0; i < numDates; i++) {
         vector<double> en;
         vector<double> ex;
+        int index = 0;
 		for (j = 0; j < numSymbols; j++) {
+            bool listed = 0;
+            if(listedSymbols[index_symbol.at(j)]) listed = 1;
+            if(listed && btBanListedSymbols) continue;
+            if(!listed && !btBanListedSymbols) continue;
+
             if(open[j][i] == DUMMY_DOUBLE) continue;
             if(high[j][i] == DUMMY_DOUBLE) continue;
             if(low[j][i] == DUMMY_DOUBLE) continue;
             if(close[j][i] == DUMMY_DOUBLE) continue;
             if(volume[j][i] == DUMMY_DOUBLE) continue;
-            
-            // if any data has been recorded on this symbol and date
-            en.push_back(gap[j][i]);
+
+            // filter by volume, price, turnover, average volume, and any other metrics here (customizable)
+            if(i > 9){
+
+                double averageVolume = 0.0;
+                for(int k=1;k<=10;k++){
+                    averageVolume += volume[j][i - k];
+                }
+                averageVolume /= 10.0;
+                double averageTurnover = 0.0;
+                for(int k=1;k<=10;k++){
+                    averageTurnover += volume[j][i - k] * close[j][i - k];
+                }
+                averageTurnover /= 10.0;
+
+                //if(averageVolume < 5000000.0) continue;
+                //if(averageVolume > 1000000.0) continue;
+                if(averageTurnover < 1000000.0) continue;
+                //if(averageTurnover > 10000000.0) continue;
+
+                //if(volume[j][i - 1] < 1000000.0) continue;
+                //if(volume[j][i - 1] > 10000000.0) continue;
+                //if(volume[j][i - 1] * close[j][i - 1] < 200000.0) continue;
+                //if(volume[j][i - 1] * close[j][i - 1] > 50000000.0) continue;
+
+                if(close[j][i - 1] < 1.0) continue;
+                //if(close[j][i - 1] > 10.0) continue;
+                //if(open[j][i] > 10.0) continue;
+
+            }else{
+                continue;
+            }
+
+            double entry = 0.0;
+
+            // set the entry value, largest or smallest entry values will get traded (customizable)
+            //entry = (double)rand();
+            //entry = (open[j][i] - open[j][i - 1]) / open[j][i - 1];
+            entry = gap[j][i];
+
+            // if any data has been recorded on this symbol and date, make it available to trade before sorting
+            en.push_back(entry);
             ex.push_back(change[j][i]);
-            index_symbol_sorted[i][j] = index_symbol.at(j);
-            symbol_index_sorted[i][index_symbol.at(j)] = j;
+            index_symbol_sorted[i][index] = index_symbol.at(j);
+            symbol_index_sorted[i][index_symbol.at(j)] = index;
+            index++;
 		}
         entries.push_back(en);
         exits.push_back(ex);
 	}
-    
+}
+
+// sort a pair of arrays from highest to lowest: sort in[] while ordering out[] so that in[i] still corresponds to out[i]
+void sortData(int firstKDataPoints) {
+	int i = 0, j = 0, k = 0, l = 0;
     bool swap = 0;
 
-    // sort the data within every day of points[]
+    // sort the data within every date
     double temp = 0.0;
     string temps = "";
     int numBuckets = 500000;
@@ -1082,79 +1136,134 @@ void sortData(bool ascending) {
             }
         }
 
+            
+        numAvailableSymbolsDate[i] = size(entries[i]);
         int numPoints = size(entries[i]);
         if (numPoints == 0) continue;
-        
-        // get the range of values to initialize the buckets
-        for (j = 0; j < numPoints; j++) {
 
-            if (entries[i][j] < minVal) minVal = entries[i][j];
-            if (entries[i][j] > maxVal) maxVal = entries[i][j] * 1.0001;
-        }
-        // clear all buckets from previous use
-        for (j = 0; j < numBuckets; j++) {
-            bucketsEntries[j].clear();
-            bucketsExits[j].clear();
-            bucketsSymbols[j].clear();
-        }
-        double range = maxVal - minVal;
-        // if all values are the same, no need to sort (buckets wouldn't work anyway)
-        if(range == 0){
-            continue;
-        }
-        int index = 0;
-        // fill the buckets with the values to be sorted
-        for (j = 0; j < numPoints; j++) {
+        // if only using the first K data points, only select these and move them to the front
+        if(firstKDataPoints > 0){
 
-            index = (int)((double)numBuckets * (entries[i][j] - minVal) / range);
-            bucketsEntries[index].push_back(entries[i][j]);
-            bucketsExits[index].push_back(exits[i][j]);
-            bucketsSymbols[index].push_back(index_symbol_sorted[i][j]);
-        }
-        // iterate over the buckets
-        for (j = 0; j < numBuckets; j++) {
-            // sort them using exchange sort
-            for (k = 0; k < size(bucketsEntries[j]); k++) {
-                for (l = k + 1; l < size(bucketsEntries[j]); l++) {
-                    swap = ascending && bucketsEntries[j][k] > bucketsEntries[j][l] || !ascending && bucketsEntries[j][k] < bucketsEntries[j][l];
-                    if (swap) {
-                        temp = bucketsEntries[j][k];
-                        bucketsEntries[j][k] = bucketsEntries[j][l];
-                        bucketsEntries[j][l] = temp;
+            double dummy = INT_MIN;
+            if(btSortDataAscending) dummy = INT_MAX;
+            vector<double> firstKEntries(firstKDataPoints, dummy);
+            vector<int> firstKIndices(firstKDataPoints, -1);
+            vector<double> firstKExits(firstKDataPoints, dummy);
+            vector<string> firstKSymbols(firstKDataPoints, "");
 
-                        temp = bucketsExits[j][k];
-                        bucketsExits[j][k] = bucketsExits[j][l];
-                        bucketsExits[j][l] = temp;
-
-                        temps = bucketsSymbols[j][k];
-                        bucketsSymbols[j][k] = bucketsSymbols[j][l];
-                        bucketsSymbols[j][l] = temps;
-
+            // find the K minimum or maximum data points in entries[i]
+            for (j = 0; j < numPoints; j++) {
+                double val = entries[i][j];
+                for(k = 0; k < firstKDataPoints; k++){
+                    if((val > firstKEntries[k] && !btSortDataAscending) || (val < firstKEntries[k] && btSortDataAscending)){
+                        for(l = firstKDataPoints - 1; l > k; l--){
+                            firstKEntries[l] = firstKEntries[l-1];
+                            firstKIndices[l] = firstKIndices[l-1];
+                        }
+                        firstKEntries[k] = val;
+                        firstKIndices[k] = j;
+                        break;
                     }
                 }
             }
-        }
 
-        // concatenate the buckets for all data types
-        index = 0;
-        for (j = 0; j < numBuckets; j++) {
-            for (k = 0; k < size(bucketsEntries[j]); k++) {
-                entries[i][index] = bucketsEntries[j][k];
-                exits[i][index] = bucketsExits[j][k];
-                index_symbol_sorted[i][index] = bucketsSymbols[j][k];
-                symbol_index_sorted[i][bucketsSymbols[j][k]] = index;
-                index++;
+            // take the same data points out of exits[i] and index_symbol_sorted[i]
+            for(j = 0; j < firstKDataPoints; j++){
+                firstKExits[j] = exits[i][firstKIndices[j]];
+                firstKSymbols[j] = index_symbol_sorted[i][firstKIndices[j]];
+            }
+
+            // update the first few data points to be the minimums/maximums (these are the only data points that will be used by the strategy)
+            for(j = 0; j < firstKDataPoints; j++){
+                if(j >= numPoints) break;
+                entries[i][j] = firstKEntries[j];
+                exits[i][j] = firstKExits[j];
+                index_symbol_sorted[i][j] = firstKSymbols[j];
+                symbol_index_sorted[i][firstKSymbols[j]] = j;
+            }
+            
+        }else{ // otherwise, use bucket sort on the full set of data
+
+            // get the range of values to initialize the buckets
+            for (j = 0; j < numPoints; j++) {
+                if (entries[i][j] < minVal) minVal = entries[i][j];
+                if (entries[i][j] > maxVal) maxVal = entries[i][j];
+            }
+            // clear all buckets from previous use
+            for (j = 0; j < numBuckets; j++) {
+                bucketsEntries[j].clear();
+                bucketsExits[j].clear();
+                bucketsSymbols[j].clear();
+            }
+            double range = maxVal - minVal;
+            // if all values are the same, no need to sort (buckets wouldn't work anyway)
+            if(range == 0){
+                continue;
+            }
+            int index = 0;
+            // fill the buckets with the values to be sorted
+            for (j = 0; j < numPoints; j++) {
+
+                index = (int)((double)(numBuckets - 1) * (entries[i][j] - minVal) / range);
+                if (index < 0 || index >= numBuckets) {
+                    cerr << "Calculated bucket index " << index << " while sorting data from date " << i << " (" << index_date.at(i) << ") was out of the range [0, " << numBuckets << "].\n\n";
+                    exit(1);
+                }
+                bucketsEntries[index].push_back(entries[i][j]);
+                bucketsExits[index].push_back(exits[i][j]);
+                bucketsSymbols[index].push_back(index_symbol_sorted[i][j]);
+            }
+            // iterate over the buckets
+            for (j = 0; j < numBuckets; j++) {
+                // sort them using exchange sort
+                for (k = 0; k < size(bucketsEntries[j]); k++) {
+                    for (l = k + 1; l < size(bucketsEntries[j]); l++) {
+                        swap = bucketsEntries[j][k] > bucketsEntries[j][l];
+                        if (swap) {
+                            temp = bucketsEntries[j][k];
+                            bucketsEntries[j][k] = bucketsEntries[j][l];
+                            bucketsEntries[j][l] = temp;
+
+                            temp = bucketsExits[j][k];
+                            bucketsExits[j][k] = bucketsExits[j][l];
+                            bucketsExits[j][l] = temp;
+
+                            temps = bucketsSymbols[j][k];
+                            bucketsSymbols[j][k] = bucketsSymbols[j][l];
+                            bucketsSymbols[j][l] = temps;
+
+                        }
+                    }
+                }
+            }
+            // concatenate the buckets for all data types
+            index = 0;
+            if(btSortDataAscending){
+                for(j = 0; j < numBuckets; j++){
+                    for(k = 0; k < size(bucketsEntries[j]); k++){
+                        entries[i][index] = bucketsEntries[j][k];
+                        exits[i][index] = bucketsExits[j][k];
+                        index_symbol_sorted[i][index] = bucketsSymbols[j][k];
+                        symbol_index_sorted[i][bucketsSymbols[j][k]] = index;
+                        index++;
+                    }
+                }
+            }else{
+                for(j = numBuckets - 1; j >= 0; j--){
+                    for(k = size(bucketsEntries[j]) - 1; k >= 0; k--){
+                        entries[i][index] = bucketsEntries[j][k];
+                        exits[i][index] = bucketsExits[j][k];
+                        index_symbol_sorted[i][index] = bucketsSymbols[j][k];
+                        symbol_index_sorted[i][bucketsSymbols[j][k]] = index;
+                        index++;
+                    }
+                }
+            }
+            if (index != numPoints) {
+                cerr << "Some data was unexpectedly lost while sorting values within date " << i << " (" << index_date.at(i) << "). Number of bucket values was " << index << " and number of points for this date was " << numPoints << ".\n\n";
+                exit(1);
             }
         }
-        if (index != numPoints) {
-            cerr << "Some data was unexpectedly lost while sorting values within a given date. Number of bucket values was " << index << " and number of points for this date was " << numPoints << ".\n\n";
-            exit(1);
-        }
-
-        // assign symbols to indices since we have only sorted indices to symbols on this day
-        //for(j=0;j<numPoints;j++){
-        //    symbol_index_day[i][index_symbol_sorted[i][j]] = j;       // don't know why I wrote this
-        //}
     }
 
     if(btPrintLoading){
@@ -1189,8 +1298,6 @@ void getStats() {
 
 			totalChange[j] += change[i][j];
 			totalGap[j] += gap[i][j];
-            
-            numAvailableSymbolsDate[j]++;
 		}
 	}
 
@@ -1234,7 +1341,7 @@ void testBacktesting() {
             total++;
 		}
 	}
-	printf("Basic stat backtesting: Wins: %i, Losses: %i, Won: %f, Lost: %f, Ties: %i, Total: %i\n\n", wins, losses, won, lost, ties, total);
+	cout << "Basic stat backtesting: Wins: " << wins << ", Losses: " << losses << ", Won: " << won << ", Lost: " << lost << ", Ties: " << ties << ", Total: " << total << "\n\n";
 }
 
 // print outlying bar values
@@ -1249,17 +1356,18 @@ void findOutliers() {
             if(j > 0){
                 if(close[i][j - 1] != 0.0) n = (open[i][j] - close[i][j - 1]) / close[i][j - 1];
             }
-            if (n >= btMaxOutlier || n <= btMinOutlier) { printf("Symbol %i with ticker %s at bar %i has an outlying daily gap of %.2f.\n", i, index_symbol.at(i), j, n);}
+            if (n <= btMinOutlier || n >= btMaxOutlier) {
+                cout << "Symbol " << i << " with ticker " << index_symbol.at(i) << " at bar " << j << " has an outlying daily gap of " << n << "\n";
+            }
             n = 0.0;
             if(open[i][j] != 0.0) n = (close[i][j] - open[i][j]) / open[i][j];
-            if (n >= btMaxOutlier || n <= btMinOutlier) { printf("Symbol %i with ticker %s at bar %i has an outlying daily change of %.2f.\n", i, index_symbol.at(i), j, n); }
-
-            // print the first outlying close price and ticker symbol of the stocks with at least one daily close greater than $10000
-            // note: in barchart files, greater than $100000s have all been removed except BRK.A
-            //if (closeRaw[i][j] >= 1000000) { printf("Symbol %i with ticker %s at bar %i has an outlying close of $%.2f.\n", i, index_symbol.at(i), j, (double)closeRaw[i][j] / 100.0); break; }
+            if (n <= btMinOutlier || n >= btMaxOutlier) {
+                cout << "Symbol " << i << " with ticker " << index_symbol.at(i) << " at bar " << j << " has an outlying daily change of " << n << "\n";
+            }
+            // maybe add a close[i][j] outlier check here next
         }
 	}
-	printf("\n");
+	cout << "\n";
 }
 
 // print the average values for every date with at least 1 bar
@@ -1271,10 +1379,10 @@ void printAverages(int dateStart, int dateEnd) {
 	for (int i = btStartingDateIndex; i <= btEndingDateIndex; i++) {
 		d = index_date[i];
 		if (numBarsByDateIndex[i] > 0) {
-			printf("Date: %i, Number of Bars: %i, Average Change: %f, Average Gap: %f\n", d, numBarsByDateIndex[i], avgChange[i], avgGap[i]);
+			cout << "Date: " << d << ", Number of Bars: " << numBarsByDateIndex[i] << ", Average Change: " << avgChange[i] << ", Average Gap: " << avgGap[i] << "\n";
 		}
 	}
-	printf("\n");
+	cout << "\n";
 }
 
 // print the bar price values for every date
@@ -1286,10 +1394,10 @@ void printNumDateBars(int dateStart, int dateEnd) {
 	for (int i = btStartingDateIndex; i <= btEndingDateIndex; i++) {
 		d = index_date[i];
 		if (numBarsByDateIndex[i] > 0) {
-			printf("Date: %i, Number of Bars: %i\n", d, numBarsByDateIndex[i]);
+			cout << "Date: " << d << ", Number of Bars: " << numBarsByDateIndex[i] << "\n";
 		}
 	}
-	printf("\n");
+	cout << "\n";
 }
 
 // print the number of bars for every symbol
@@ -1300,9 +1408,9 @@ void printNumSymbolBars(int start, int end) {
 	if (end >= numSymbols) end = numSymbols - 1;
 
 	for (int i = start; i <= end; i++) {
-		printf("Symbol Index: %i, Ticker %s, Number of Bars: %i\n", i, index_symbol[i], numBars[i]);
+		cout << "Symbol Index: " << i << ", Ticker " << index_symbol[i] << ", Number of Bars: " << numBars[i] << "\n";
 	}
-	printf("\n");
+	cout << "\n";
 }
 
 // print the bar data for every date
@@ -1325,7 +1433,7 @@ void printAllDateBars(int dateStart, int dateEnd) {
 
 		}
 	}
-	printf("Number of symbols: %i\n\n", numSymbols);
+	cout << "Number of symbols: " << numSymbols << "\n\n";
 }
 
 // print the bar price values for every symbol
@@ -1354,11 +1462,11 @@ void printAllSymbolBars(int symbolStart, int symbolEnd, int dateStart, int dateE
             if(j > 0){
                 if(close[i][j - 1] != 0.0) gap = (open[i][j] - close[i][j - 1]) / close[i][j - 1];
             }
-			printf("Bar %i (%i): %i %i %i %i, Change: %.2f%%, Gap: %.2f%%\n", j, d, open[i][j], high[i][j], low[i][j], close[i][j], change, gap);
+			cout << "Bar " << j << " (" << d << "): " << open[i][j] << " " << high[i][j] << " " << low[i][j] << " " << close[i][j] << ", Change: " << change << ", Gap: " << gap << "\n";
 		}
-		printf("\n");
+		cout << "\n";
 	}
-	printf("Number of symbols: %i\n\n", numSymbols);
+	cout << "Number of symbols: " << numSymbols << "\n\n";
 }
 
 // create date/index converter, initialize and fill data storage by date
@@ -1383,33 +1491,31 @@ void setupDateData() {
 		while(j > 0) {
 			// copy the first value left to fill in dates before the beginning of this symbol's history
 			open[i][j - 1] = open[i][j];
-			high[i][j - 1] = high[i][j];
-			low[i][j - 1] = low[i][j];
-			close[i][j - 1] = close[i][j];
-			volume[i][j - 1] = volume[i][j];
+			high[i][j - 1] = open[i][j];
+			low[i][j - 1] = open[i][j];
+			close[i][j - 1] = open[i][j];
+			volume[i][j - 1] = 0;
             j--;
 		}
 		for (j = 1; j < numDates; j++) {
 			// copy next values right to fill in holes and dates after symbol history
 			if (close[i][j] == DUMMY_DOUBLE) {
-				open[i][j] = open[i][j - 1];
-				high[i][j] = high[i][j - 1];
-				low[i][j] = low[i][j - 1];
+				open[i][j] = close[i][j - 1];
+				high[i][j] = close[i][j - 1];
+				low[i][j] = close[i][j - 1];
 				close[i][j] = close[i][j - 1];
-				volume[i][j] = volume[i][j - 1];
+				volume[i][j] = 0;
 			}
 		}
 	}
 }
 
 // setup the file reader, read, reverse (if daily bars are sorted in descending date order), and interpret all the data
-char gatherData(string path) {
+void gatherData(string path) {
 
 	cout << "Setting up file reader... (This may take a few seconds to minutes depending on the amount of data present.)\n\n";
 
 	setup();
-
-	cout << "Reading data... (This may take a few seconds to minutes depending on the amount of data present.)\n\n";
 
 	readAllFiles(path);
 
@@ -1421,33 +1527,116 @@ char gatherData(string path) {
 
     cout << "Sorting the date data... (This may take a few seconds to minutes depending on the amount of data present.)\n\n";
     
-	sortData(true);
+    loadData();
+	sortData(6);
 
 	cout << "Finished gathering data.\n\n";
-	
-	return 1;
+}
+
+void reformatSymbolList(string src, string dest){
+
+    ifstream f(src);
+
+    if (!f.is_open()) {
+        cerr << "Reformatting source file " << src << " was found but could not be opened.\n\n";
+        exit(1);
+    }
+
+    string currentLine = "";
+    string previousLine = "";
+    string output = "";
+
+    while (getline(f, currentLine)) {
+        
+        // skip lines containing useless data
+        if(currentLine == "D") continue; // only US exception is Dominion Energy stock in NYSE with ticker D                                1 in TradingView List
+        if(currentLine == "DR") continue; // no US exceptions. only in TSX and NEO exchanges
+        if(currentLine == "P") continue; // no exceptions. only Euro swapnote futures
+        if(currentLine == "REIT") continue; // only US exception is ETF in NASDAQ with ticker REIT and DJ cfd index                         1 in TradingView List
+        if(currentLine == "CEF") continue; // only US exception is closedend fund in NYSE. also funds in TSX NEO and futures in TAIFEX
+        if(currentLine == "UIT") continue; // no exceptions.
+        if(currentLine == "TF") continue; // no US exceptions. only in TSX and NEO exchanges. and futures in SGX and CFFEX exchanges.
+        // random image letters also need to be removed manually
+
+        output += currentLine + "\n";
+        previousLine = currentLine;
+    }
+
+    f.close();
+
+    ofstream g(dest);
+
+    if (!g.is_open()) {
+        cerr << "Reformatting destination file " << dest << " was found but could not be opened.\n\n";
+        exit(1);
+    }
+
+    g << output;
+
+    g.close();
+}
+
+void readListedSymbols(string path, bool print){
+
+    ifstream f(path);
+
+    if (!f.is_open()) {
+        cerr << "File " << path << " was found but could not be opened.\n\n";
+        exit(1);
+    }
+
+    string currentLine = "";
+    string previousLine = "";
+    int lineNum = 0;
+    string ticker = "";
+
+    while (getline(f, currentLine)) {
+        if(previousLine == ""){
+            bool flag = 1;
+            for(int i=0;i<size(currentLine);i++){
+                if(currentLine[i] >= 'a' && currentLine[i] <= 'z'){
+                    flag = 0; break;
+                }
+            }
+            if(flag){
+                if(!listedSymbols[currentLine]){
+                    if(print){
+                        cout << currentLine << " ";
+                    }
+                    listedSymbols[currentLine] = 1;
+                    numListedSymbols++;
+                }
+            }
+        }
+
+        lineNum++;
+        previousLine = currentLine;
+    }
+
+    f.close();
+    cout << "\n\nFinished reading " << numListedSymbols << " symbol tickers from file " << path << ".\n\n";
 }
 
 // backtest the chosen strategy
-void backtest(int dateStart, int dateEnd, char skipIfNotEnoughBars, char printResults) {
+void backtest(int dateStart, int dateEnd, char skipIfNotEnoughBars) {
 
 	if (btLeverage <= 0.0 || btLeverage > 100.0) {
-		printf("Backtesting leverage must be greater than 0 and at most 100.\n\n");
+		cout << "Backtesting leverage must be greater than 0 and at most 100.\n\n";
 		exit(1);
 	}
 	if (dateStart > dateEnd) {
-		printf("Starting date must be less than or equal to ending date.\n\n");
+		cout << "Starting date must be less than or equal to ending date.\n\n";
 		exit(1);
 	}
 
 	getDateIndices(dateStart, dateEnd);
 
-	if (printResults) {
+	if (btPrintSummary) {
 		cout << "Running the backtest from " << dateStart << " (adjusted to " << index_date.at(btStartingDateIndex) << " with index " << btStartingDateIndex << ") to " << dateEnd << " (adjusted to " << index_date.at(btEndingDateIndex) << " with index " << btEndingDateIndex << ")... (This may take a few seconds to minutes depending on the amount of data present.)\n\n";
 	}
 
-	double n = 0.0;
-	double ln = 0.0;
+	double multiplier = 0.0;
+	double leveragedMultiplier = 0.0;
 
 	int barEnd = 0;
 
@@ -1469,6 +1658,10 @@ void backtest(int dateStart, int dateEnd, char skipIfNotEnoughBars, char printRe
     }
 
 	for (int i = btStartingDateIndex; i <= btEndingDateIndex; i++) {
+
+        vector<double> emptyVector;
+        btResultDate.push_back(emptyVector);
+        int resultDateIndex = i - btStartingDateIndex;
 
 		int x = numAvailableSymbolsDate[i];
 		double e = 0.0;
@@ -1504,6 +1697,8 @@ void backtest(int dateStart, int dateEnd, char skipIfNotEnoughBars, char printRe
 		for (int j = 0; j <= ending - starting; j++) {
             int symbol = j + starting;
 			e = exits[i][symbol];
+            btResultDate[resultDateIndex].push_back(e);
+            btResult.push_back(e);
 
             if(e <= btMinOutlier || e >= btMaxOutlier){
                 btNumOutliers[j]++;
@@ -1514,8 +1709,8 @@ void backtest(int dateStart, int dateEnd, char skipIfNotEnoughBars, char printRe
             }
 
 			// calculate what to multiply account by as a result of this trade
-			n = (100.0 + e) / 100.0;
-			ln = (100.0 + btLeverage * e) / 100.0;
+			multiplier = 1.0 + e;
+			leveragedMultiplier = 1.0 + btLeverage * e;
 
 			// evaluate outcome
             btTrades[j]++;
@@ -1532,37 +1727,36 @@ void backtest(int dateStart, int dateEnd, char skipIfNotEnoughBars, char printRe
 					btTies[j]++;
 				}
 			}
-			btBalance[j] *= ln;
-			btVar[j] += e * e / 10000.0;
+			btBalance[j] *= leveragedMultiplier;
+			btVar[j] += e * e;
 
-            if(btPrintEntries){
-                if(btPrintDetailedResults){
-                    cout << index_date.at(i) << "_" << index_symbol_sorted[i].at(symbol) << "_" << entries[i][symbol] << "_" << exits[i][symbol] << " ";
-                }else{
-                    cout << e << " ";
-                }
+            if(btPrintDetailedResults){
+                cout << index_date.at(i) << "_" << index_symbol_sorted[i].at(symbol) << "_" << entries[i][symbol] << "_" << exits[i][symbol] << " ";
+            }
+            if(btPrintEntries && !btPrintDetailedResults){
+                cout << e << " ";
             }
 		}
 
-        if(btPrintEntries){
+        if(btPrintEntries || btPrintDetailedResults){
             cout << "\n";
         }
 		
 		numDatesTraded++;
 	}
 
-	if (printResults) {
+	if (btPrintSummary) {
         int r = size(btBalance);
         string output = "";
 		output += "Finished the backtest from " + to_string(dateStart) + " (adjusted to " + to_string(index_date.at(btStartingDateIndex)) + " with index " + to_string(btStartingDateIndex) + ") to " + to_string(dateEnd) + " (adjusted to " + to_string(index_date.at(btEndingDateIndex)) + " with index " + to_string(btEndingDateIndex) + ").\n\n";
         output += "SUMMARY:\n\nNumber of Dates Considered For Trading: ";
         output += to_string(numDatesObserved) + "\nNumber of Dates Traded: ";
         output += to_string(numDatesTraded) + "\nNumber of Trades Completed: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btTrades[i]) + " ";
         }
         output += "\nNumber of Trades Per Day Traded: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((double)btTrades[i] / (double)numDatesTraded) + " ";
         }
         output += "\nNumber of Symbols Available Per Day Traded: ";
@@ -1574,80 +1768,85 @@ void backtest(int dateStart, int dateEnd, char skipIfNotEnoughBars, char printRe
             output += to_string(btBalance[i]) + " ";
         }
         output += "\nWins: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btWins[i]) + " ";
         }
         output += "\nTies: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btTies[i]) + " ";
         }
         output += "\nLosses: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btLosses[i]) + " ";
         }
         output += "\nWin Rate: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((double)btWins[i] / (double)btTrades[i]) + " ";
         }
         output += "\nTie Rate: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((double)btTies[i] / (double)btTrades[i]) + " ";
         }
         output += "\nLoss Rate: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((double)btLosses[i] / (double)btTrades[i]) + " ";
         }
         output += "\nTotal of Wins: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btWon[i]) + " ";
         }
         output += "\nTotal of Losses: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btLost[i]) + " ";
         }
         output += "\nProfit Factor: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(-1.0 * btWon[i] / btLost[i]) + " ";
         }
         output += "\nAverage Win Result: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btWon[i] / (double)btWins[i]) + " ";
         }
         output += "\nAverage Loss Result: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btLost[i] / (double)btLosses[i]) + " ";
         }
         output += "\nAverage Trade Result: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((btWon[i] + btLost[i]) / (double)btTrades[i]) + " ";
         }
         output += "\nSum of Trade Results: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string(btWon[i] + btLost[i]) + " ";
         }
         output += "\nAverage Squared Deviation (Variance): ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((double)btVar[i] / (double)btTrades[i]) + " ";
         }
         output += "\nLeveraged Account Gain Sharpe Ratio: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((btBalance[i] - 1.0) / sqrt((double)btVar[i] / (double)btTrades[i])) + " ";
         }
         output += "\nTotal Trade Gain Sharpe Ratio: ";
-        for(int i=0;i<r;i++){
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
             output += to_string((btWon[i] + btLost[i]) / sqrt((double)btVar[i] / (double)btTrades[i])) + " ";
         }
-        cout << output;
+        output += "\nNumber of Outliers: ";
+        for(int i = 0; i < r; i += btPrintResultsIncrement){
+            output += to_string(btNumOutliers[i]) + " ";
+        }
+        cout << output << "\n\n";
 	}
 }
 
-void backtestAndPrintHistogram(int dateStart, int dateEnd, char skipIfNotEnoughBars, double minLeverage, double maxLeverage, int chartHeight) {
+void backtestAndPrintHistogram(int dateStart, int dateEnd, char skipIfNotEnoughBars, int chartHeight) {
+
+	backtest(dateStart, dateEnd, skipIfNotEnoughBars);
+
 	double maxResult = -1.0 * pow(2.0, 80.0), minResult = pow(2.0, 80.0);
     int worstRank = 0, bestRank = 0;
     int r = size(btBalance);
 	double* bars = (double*)calloc(r, sizeof(double));
-
-	backtest(dateStart, dateEnd, skipIfNotEnoughBars, 0);
 
 	for (int i = 0; i < r; i++) {
 		if (btBalance[i] < minResult) {
@@ -1660,53 +1859,137 @@ void backtestAndPrintHistogram(int dateStart, int dateEnd, char skipIfNotEnoughB
 		}
 		bars[i] = btBalance[i];
 	}
+    cout << "\n\n";
 	for (int i = 0; i < chartHeight; i++) {
-		printf("|");
+		cout << "|";
 		for (int j = 0; j < r; j++) {
 			if ((bars[j] - minResult) / (maxResult - minResult) >= (double)(chartHeight - i) / (double)chartHeight) {
-				printf("#");
+				cout << "#";
 			}
 			else {
-				printf(" ");
+				cout << " ";
 			}
 		}
-		printf("|\n");
+		cout << "|\n";
 	}
-	printf("\nShowing balance outcome results from date %i to date %i .\n\n\n", dateStart, dateEnd);
-	printf("\nMinimum Result: %f at rank %f, Maximum Result: %f at rank %f.\n\n\n", minResult, worstRank, maxResult, bestRank);
+	cout << "\nShowing balance outcome results from date " << dateStart << " to date " << dateEnd << ".\n";
+	cout << "Maximum Result: " << maxResult << " at rank " << bestRank << ", Minimum Result: " << minResult << " at rank " << worstRank << ".\n\n\n";
+}
+
+void printResultsHistogram(double lowerLimit, double upperLimit, int chartWidth, int chartHeight) {
+    double limitRange = upperLimit - lowerLimit;
+	int maxCount = INT_MIN, minCount = INT_MAX;
+    int maxIndex = 0, minIndex = 0;
+
+    vector<int> buckets(chartWidth, 0);
+    vector<double> bucketUpperLimit(chartWidth, 0.0);
+    int numResultsCategorized = 0;
+
+    for(int i=0;i<chartWidth;i++){
+        bucketUpperLimit[i] = ((double)(i+1) / (double)chartWidth) * limitRange + lowerLimit;
+    }
+
+    for(int i=0;i<size(btResult);i++){
+        // finding the bucket this result belongs in and putting it there
+        for(int j=0;j<chartWidth;j++){
+            if(btResult[i] >= lowerLimit && btResult[i] < bucketUpperLimit[j]){
+                buckets[j]++;
+                numResultsCategorized++;
+                break;
+            }
+        }
+    }
+
+	for (int i = 0; i < chartWidth; i++) {
+		if (buckets[i] < minCount) {
+			minCount = buckets[i];
+			minIndex = i;
+		}
+		if (buckets[i] > maxCount){
+			maxCount = buckets[i];
+			maxIndex = i;
+		}
+	}
+    cout << "\n\n";
+	for (int i = 0; i < chartHeight; i++) {
+		cout << "|";
+		for (int j = 0; j < chartWidth; j++) {
+			if (((double)buckets[j] - (double)minCount) / ((double)maxCount - (double)minCount) >= (double)(chartHeight - i) / (double)chartHeight) {
+				cout << "#";
+			}
+			else {
+				cout << " ";
+			}
+		}
+		cout << "|\n";
+	}
+	cout << "\nShowing all trade results between " << lowerLimit << " and " << upperLimit << ".\n";
+    double maxll = lowerLimit;
+    if(maxIndex > 0) maxll = bucketUpperLimit[maxIndex - 1];
+    double minll = lowerLimit;
+    if(minIndex > 0) minll = bucketUpperLimit[minIndex - 1];
+	cout << "Maximum Result Count: " << maxCount << " at bar " << maxIndex << " (results from " << maxll << " to " << bucketUpperLimit[maxIndex] << "), Minimum Result: " << minCount << " at bar " << minIndex << " (results from " << minll << " to " << bucketUpperLimit[minIndex] << ").\n\n\n";
+}
+
+void simulateResultsWithLeverages(vector<double>& leverages){
+    int n = size(leverages);
+    cout << "Simulating previous results with " << n << " different leverages...\n\n";
+    for(int i=0;i<n;i++){
+        double l = leverages[i];
+        if(l < 0.0 || l > 10.0){
+            cerr << "Leverage " << i << " (0-indexed) was outside of the range [0.0, 10.0]\n\n";
+            exit(1);
+        }
+
+        double balance = 1.0;
+        for(int j=0;j<size(btResult);j++){
+            balance *= 1.0 + l * btResult[j];
+        }
+
+        cout << l << "\t" << balance << "\n";
+    }
+    cout << "\nSimulated " << n << " leverages.\n\n";
 }
 
 int main(void) {
+        
+    auto runStart = chrono::high_resolution_clock::now();
+    
     setup();
 
     string readPath = "C:\\Minute Stock Data\\";
     columnCodes = "SVOCHLU-";
 
     // set backtesting settings:
-    // int btStartingDateIndex, int btEndingDateIndex, int btMinSymbolRankDay, int btMaxSymbolRankDay,
+    // bool btBanListedSymbols,
+    // int btStartingDateIndex, int btEndingDateIndex, int btMinSymbolRankDay, int btMaxSymbolRankDay, bool btSortDataAscending,
     // double btLeverage, bool btDisregardFilters, double btMinOutlier, double btMaxOutlier, bool btIgnoreOutliers,
     // bool btPrintOutliers, bool btPrintEntries, bool btPrintAllResults, bool btPrintDetailedResults,
-    // bool btPrintLoading, bool btPrintLoadingInterval, int btLoadingBarWidth, bool btPrintSummary
+    // bool btPrintLoading, bool btPrintLoadingInterval, int btLoadingBarWidth, bool btPrintSummary, int btPrintResultsIncrement
+    btBanListedSymbols = false;
     btStartingDateIndex = 0;
     btEndingDateIndex = -1;
     btMinSymbolRankDay = 0;
-    btMaxSymbolRankDay = 3;
+    btMaxSymbolRankDay = 0;
+    btSortDataAscending = true;
     btLeverage = 1.0;
-    btMinOutlier = -0.5;
+    btMinOutlier = -1.0;
     btMaxOutlier = 1.0;
     btIgnoreOutliers = false;
-    btPrintOutliers = true;
-    btPrintEntries = true;
-    btPrintAllResults = true;
+    btPrintOutliers = false;
+    btPrintEntries = false;
+    btPrintAllResults = false;
     btPrintDetailedResults = true;
-    btPrintLoading = false;
-    btPrintLoadingInterval = 5;
+    btPrintLoading = true;
+    btPrintLoadingInterval = 10;
     btLoadingBarWidth = 60;
     btPrintSummary = true;
+    btPrintResultsIncrement = 1;
 
-	if (!gatherData("C:\\Daily Stock Data\\")) {
-		return -1;
-	}
+    //reformatSymbolList("C:\\Stock Symbols\\TradingView Full Symbols List AMEX-CBOE-NASDAQ-NYSE-OTC.txt", "C:\\Stock Symbols\\___.txt");
+    readListedSymbols("C:\\Stock Symbols\\TradingView Full Symbols List Reformatted.txt", false);
+
+	gatherData("C:\\Daily Stock Data\\");
 
 	//printAllSymbolBars(0, 3, 20240102, 20240106);
 	//printAllDateBars(20240102, 20240106);
@@ -1720,9 +2003,19 @@ int main(void) {
 
 	//testBacktesting();
 	
-	backtest(20100101, 20260101, 0, 1);
+	backtest(20100101, 20291231, false);
 
-	//backtestAndPrintHistogram(20100101, 20260101, 1, 0.01, 1.0, 100, 20);
+	//backtestAndPrintHistogram(20100101, 20291231, false, 12);
 
-	return 0;
+    //printResultsHistogram(-0.2, 0.2, 150, 30);
+
+    vector<double> leverages = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
+    simulateResultsWithLeverages(leverages);
+
+    auto runEnd = chrono::high_resolution_clock::now();
+
+    chrono::nanoseconds runDiff = runEnd - runStart;
+    long long runDuration = (long long)runDiff.count();
+	cout << "Program finished lasting " << runDuration / (long long)1000000000 << " seconds and " << runDuration % (long long)1000000000 << " nanoseconds.\n\n";
+    return 0;
 }
